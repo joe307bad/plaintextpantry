@@ -1,14 +1,16 @@
 # yaml-language-server: $schema=https://unpkg.com/@powersync/service-sync-rules@latest/schema/sync_rules.json
-# Restart the powersync container after editing this file.
+# Restart the powersync container after editing this file (deploy.sh does
+# this automatically via the config hash).
 
 config:
   edition: 3
 
+# Each client syncs only its own rows. auth.user_id() is the `sub` of the JWT
+# the F# server mints at /api/sync/credentials, i.e. the Keycloak subject.
 streams:
-  # Single-user local app for now: every client gets every recipe.
   recipes:
     auto_subscribe: true
-    query: SELECT * FROM recipes
+    query: SELECT * FROM recipes WHERE user_id = auth.user_id()
   shopping_items:
     auto_subscribe: true
-    query: SELECT * FROM shopping_items
+    query: SELECT * FROM shopping_items WHERE user_id = auth.user_id()

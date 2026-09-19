@@ -1,6 +1,9 @@
 # Static client: Fable (needs the .NET SDK) + Vite, served by Caddy. The
 # Caddyfile is not baked in - infra/deploy mounts it, so routing changes don't
 # force a rebuild of this image.
+#
+# Build context is app/:  docker build -f infra/docker/images/Dockerfile.web app
+# (Dockerfile.web.dockerignore beside this file keeps bin/obj/node_modules out.)
 FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \

@@ -4,8 +4,11 @@
 #
 #   /health       -> Caddy itself (deploy + CI health checks)
 #   /api/*        -> F# server (prefix kept; the server routes on /api/...)
+#   /mcp          -> F# server: the MCP endpoint
+#   /.well-known/oauth-protected-resource* -> F# server: RFC 9728 metadata
 #   /powersync/*  -> PowerSync service (prefix stripped)
 #   /*            -> static client, SPA fallback to index.html
+#   auth.<domain> -> Keycloak
 
 {$DOMAIN} {
     encode zstd gzip
@@ -15,6 +18,14 @@
     }
 
     handle /api/* {
+        reverse_proxy server:5050
+    }
+
+    handle /mcp* {
+        reverse_proxy server:5050
+    }
+
+    handle /.well-known/oauth-protected-resource* {
         reverse_proxy server:5050
     }
 
@@ -35,4 +46,11 @@
 
 www.{$DOMAIN} {
     redir https://{$DOMAIN}{uri} permanent
+}
+
+auth.{$DOMAIN} {
+    encode zstd gzip
+    # Keycloak builds its URLs from KC_HOSTNAME and reads the forwarded
+    # scheme/host (KC_PROXY_HEADERS=xforwarded), which Caddy sets by default.
+    reverse_proxy keycloak:8080
 }

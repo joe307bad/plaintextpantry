@@ -15,8 +15,12 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      // Fable.Remoting calls go to the F# server.
+      // The F# server: API, OIDC login callback, and the MCP endpoint with its
+      // RFC 9728 metadata. Host header is passed through unchanged so the
+      // server builds OIDC redirect URIs on the browser's origin (:5173).
       '/api': 'http://localhost:5050',
+      '/mcp': 'http://localhost:5050',
+      '/.well-known': 'http://localhost:5050',
     },
   },
 });

@@ -1,6 +1,8 @@
 # F# API server. Compiles on the build host's native architecture and only
 # copies the published output into the target-arch runtime image, so building
 # linux/arm64 from an x64 CI runner never runs dotnet under emulation.
+#
+# Build context is app/:  docker build -f infra/docker/images/Dockerfile.server app
 FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 ARG TARGETARCH
 WORKDIR /src

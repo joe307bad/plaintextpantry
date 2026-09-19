@@ -3,8 +3,8 @@ name: Deploy
 # Every merge to main converges AWS on the repo, in three stages that each
 # detect their own changes:
 #   infra  - terraform plan; apply only if the plan has changes
-#   build  - images tagged by the git tree hash of app/; skipped if the tag
-#            already exists in ECR (i.e. app/ didn't change)
+#   build  - images tagged by a hash of the app/ and infra/docker/images/ git
+#            trees; skipped if the tag already exists in ECR (nothing changed)
 #   deploy - ship the compose bundle over SSM; `docker compose up -d` only
 #            recreates containers whose image or config differ
 on:
@@ -100,10 +100,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Content address: identical app/ source -> identical tag.
+      # Content address: identical sources + Dockerfiles -> identical tag.
       - name: Image tag
         id: tag
-        run: echo "tag=$(git rev-parse HEAD:app)" >> "$GITHUB_OUTPUT"
+        run: echo "tag=$(git rev-parse HEAD:app HEAD:infra/docker/images | sha256sum | cut -c1-40)" >> "$GITHUB_OUTPUT"
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -140,7 +140,7 @@ jobs:
           for repo in ${{ steps.exists.outputs.missing }}; do
             docker buildx build \
               --platform linux/arm64 \
-              --file app/Dockerfile.$repo \
+              --file infra/docker/images/Dockerfile.$repo \
               --tag $REGISTRY/plaintextpantry/$repo:$TAG \
               --cache-from type=gha,scope=$repo \
               --cache-to type=gha,scope=$repo,mode=max \
@@ -170,6 +170,7 @@ jobs:
           cp -r infra/deploy/. "$stage/"
           cp -r infra/docker/powersync "$stage/powersync"
           cp -r infra/docker/postgres "$stage/postgres"
+          cp -r infra/keycloak "$stage/keycloak"
           tar -C "$stage" -czf bundle.tgz .
           aws s3 cp bundle.tgz "s3://$BUCKET/bundles/${{ github.sha }}.tgz"
 

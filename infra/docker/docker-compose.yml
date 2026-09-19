@@ -53,5 +53,41 @@ services:
       retries: 20
       start_period: 10s
 
+  # Identity provider. Owns users and issues every token: the browser's login
+  # session (via the F# server, OIDC) and MCP access tokens for Claude. Local
+  # dev runs it in dev mode with a seeded password user; prod brokers Google.
+  # The realm is provisioned by infra/keycloak/provision.sh (dev.sh runs it).
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7
+    restart: unless-stopped
+    command: ["start-dev"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: ${PG_USER}
+      KC_DB_PASSWORD: ${PG_PASSWORD}
+      KC_HTTP_PORT: ${KC_PORT}
+      KC_HEALTH_ENABLED: "true"
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      JAVA_OPTS_KC_HEAP: "-Xms64m -Xmx384m"
+    ports:
+      - "${KC_PORT}:${KC_PORT}"
+    healthcheck:
+      # Management port 9000. The image has no curl/wget; bash's /dev/tcp does.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q '200 OK' <&3
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+
 volumes:
   pg_data:

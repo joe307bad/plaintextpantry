@@ -9,8 +9,24 @@ type Config =
       PowerSyncUrl: string
       JwtSecret: string
       JwtAudience: string
-      /// Single fixed user until real auth exists.
-      UserId: string }
+      /// Where the browser reaches the app (post-logout landing page).
+      AppUrl: string
+      /// Keycloak realm as the browser sees it; also the `iss` every token must carry.
+      KeycloakIssuer: string
+      /// Where THIS process fetches discovery + JWKS from. Same as the issuer
+      /// locally; in prod the internal `http://keycloak:8080/...` so the box
+      /// doesn't loop out through its own public IP.
+      KeycloakMetadataUrl: string
+      KeycloakClientId: string
+      KeycloakClientSecret: string
+      /// Public URL of the MCP endpoint. Doubles as the OAuth resource
+      /// identifier: Keycloak stamps it into access tokens as `aud` and the
+      /// server only accepts MCP tokens that carry it.
+      McpResource: string
+      /// Discovery/JWKS may be fetched over plain http: local dev, or prod's
+      /// internal `http://keycloak:8080`. Token issuer/audience checks are
+      /// unaffected by this.
+      AllowInsecureKeycloak: bool }
 
 let private env name fallback =
     match Environment.GetEnvironmentVariable name with
@@ -26,10 +42,18 @@ let load () =
     let pgPort = env "PG_PORT" "5432"
     let pgDb = env "PG_APP_DB" "pantry"
     let psPort = env "PS_PORT" "8080"
+    let issuer = (env "KEYCLOAK_ISSUER" "http://localhost:8180/realms/plaintextpantry").TrimEnd '/'
+    let metadataUrl = (env "KEYCLOAK_METADATA_URL" issuer).TrimEnd '/'
 
     { ListenUrl = env "SERVER_URL" "http://localhost:5050"
       ConnectionString = $"Host={pgHost};Port={pgPort};Username={pgUser};Password={pgPassword};Database={pgDb}"
       PowerSyncUrl = env "POWERSYNC_URL" $"http://localhost:{psPort}"
       JwtSecret = env "POWERSYNC_JWT_SECRET" "plaintextpantry-local-dev-jwt-secret-change-me-before-anyone-cares"
       JwtAudience = "powersync-dev"
-      UserId = "local-dev-user" }
+      AppUrl = (env "APP_URL" "http://localhost:5173").TrimEnd '/'
+      KeycloakIssuer = issuer
+      KeycloakMetadataUrl = metadataUrl
+      KeycloakClientId = env "KEYCLOAK_CLIENT_ID" "plaintextpantry-web"
+      KeycloakClientSecret = env "KEYCLOAK_CLIENT_SECRET" "plaintextpantry-local-dev-client-secret"
+      McpResource = (env "MCP_RESOURCE" "http://localhost:5050/mcp").TrimEnd '/'
+      AllowInsecureKeycloak = metadataUrl.StartsWith "http://" }

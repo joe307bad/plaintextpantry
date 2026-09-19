@@ -35,8 +35,15 @@ type Page =
 /// Editable recipe fields, used by both the "New Recipe" modal and the detail page.
 type RecipeForm = { Title: string; Body: string }
 
+/// Who is signed in. Data only starts syncing once we know.
+type Session =
+    | Checking
+    | SignedOut
+    | SignedIn of Shared.User
+
 type Model =
     { Page: Page
+      Session: Session
       Recipes: Recipe list
       ShoppingItems: ShoppingItem list
       /// `Some` while the "New Recipe" modal is open.
@@ -47,6 +54,9 @@ type Model =
       PendingDelete: string option }
 
 type Msg =
+    | SessionChecked of Shared.User option
+    | SignIn
+    | SignOut
     | UrlChanged of string list
     | RecipesChanged of Recipe list
     | ShoppingItemsChanged of ShoppingItem list
@@ -81,15 +91,23 @@ let private fireAndForget (work: JS.Promise<'a>) =
 
 let init () =
     { Page = parseUrl (Router.currentUrl ())
+      Session = Checking
       Recipes = []
       ShoppingItems = []
       NewRecipe = None
       Edit = None
       PendingDelete = None },
     Cmd.batch
+        [ Cmd.ofEffect (fun dispatch -> Router.onUrlChanged (UrlChanged >> dispatch))
+          Cmd.OfPromise.either Db.currentUser () SessionChecked (fun err ->
+              console.error err
+              SessionChecked None) ]
+
+/// Once signed in: open the live queries and start syncing.
+let private startSync () =
+    Cmd.batch
         [ Cmd.ofEffect (fun dispatch -> Db.watchRecipes (RecipesChanged >> dispatch))
           Cmd.ofEffect (fun dispatch -> Db.watchShoppingItems (ShoppingItemsChanged >> dispatch))
-          Cmd.ofEffect (fun dispatch -> Router.onUrlChanged (UrlChanged >> dispatch))
           Cmd.ofEffect (fun _ -> Db.connect () |> Promise.catch (fun e -> console.error e) |> ignore) ]
 
 let private findRecipe id (recipes: Recipe list) =
@@ -99,6 +117,10 @@ let private formOf (recipe: Recipe) = { Title = recipe.title; Body = recipe.body
 
 let update msg model =
     match msg with
+    | SessionChecked(Some user) -> { model with Session = SignedIn user }, startSync ()
+    | SessionChecked None -> { model with Session = SignedOut }, Cmd.none
+    | SignIn -> model, Cmd.ofEffect (fun _ -> Db.signIn ())
+    | SignOut -> model, fireAndForget (Db.signOut ())
     | UrlChanged segments ->
         let page = parseUrl segments
 
@@ -170,7 +192,7 @@ let private linkWith (className: string) dispatch (segments: string list) (text:
 
 let private link dispatch = linkWith "" dispatch
 
-let private navBar (page: Page) dispatch =
+let private navBar (page: Page) (user: Shared.User) dispatch =
     let navLink segments text isActive =
         linkWith
             (if isActive then "font-semibold text-gray-900" else "text-gray-500 hover:text-gray-900")
@@ -185,10 +207,26 @@ let private navBar (page: Page) dispatch =
         | _ -> false
 
     Html.nav
-        [ prop.className "flex gap-6 border-b border-gray-200 px-4 py-3"
+        [ prop.className "flex items-center gap-6 border-b border-gray-200 px-4 py-3"
           prop.children
               [ navLink [] "Recipes" onRecipes
-                navLink [ "shopping-list" ] "Shopping list" (page = ShoppingList) ] ]
+                navLink [ "shopping-list" ] "Shopping list" (page = ShoppingList)
+                Html.span [ prop.className "ml-auto text-sm text-gray-500"; prop.text user.Email ]
+                Html.button
+                    [ prop.className "text-sm text-gray-500 hover:text-gray-900"
+                      prop.text "Sign out"
+                      prop.onClick (fun _ -> dispatch SignOut) ] ] ]
+
+let private loginPage dispatch =
+    Html.main
+        [ prop.className "flex min-h-screen flex-col items-center justify-center gap-4 px-4"
+          prop.children
+              [ Html.h1 [ prop.className "text-2xl font-semibold"; prop.text "Plaintext Pantry" ]
+                Html.p [ prop.className "text-gray-500"; prop.text "Recipes in plain text, on every device." ]
+                Html.button
+                    [ prop.className "rounded bg-gray-900 px-4 py-2 text-white hover:bg-gray-700"
+                      prop.text "Sign in"
+                      prop.onClick (fun _ -> dispatch SignIn) ] ] ]
 
 let private newRecipeModal (recipe: RecipeForm) (known: CooklangEditor.KnownNames) dispatch =
     let field = "w-full rounded border border-gray-300 px-2 py-1"
@@ -385,16 +423,20 @@ let View () =
             [| box model.Recipes |]
         )
 
-    Html.div
-        [ navBar model.Page dispatch
-          Html.main
-              [ prop.className "px-4 py-3"
-                prop.children
-                    [ match model.Page with
-                      | RecipeList -> listPage model known dispatch
-                      | RecipeDetail id -> detailPage model id known dispatch
-                      | ShoppingList -> shoppingListPage model dispatch
-                      | NotFound -> Html.p "Page not found." ] ] ]
+    match model.Session with
+    | Checking -> Html.none
+    | SignedOut -> loginPage dispatch
+    | SignedIn user ->
+        Html.div
+            [ navBar model.Page user dispatch
+              Html.main
+                  [ prop.className "px-4 py-3"
+                    prop.children
+                        [ match model.Page with
+                          | RecipeList -> listPage model known dispatch
+                          | RecipeDetail id -> detailPage model id known dispatch
+                          | ShoppingList -> shoppingListPage model dispatch
+                          | NotFound -> Html.p "Page not found." ] ] ]
 
 let root = ReactDOM.createRoot (document.getElementById "root")
 root.render (View())

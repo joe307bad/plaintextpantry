@@ -8,7 +8,9 @@
   <ItemGroup>
     <Compile Include="Config.fs" />
     <Compile Include="Jwt.fs" />
+    <Compile Include="Auth.fs" />
     <Compile Include="Db.fs" />
+    <Compile Include="Mcp.fs" />
     <Compile Include="Api.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
@@ -19,5 +21,8 @@
     <PackageReference Include="Giraffe" Version="8.*" />
     <PackageReference Include="Thoth.Json.System.Text.Json" Version="0.*" />
     <PackageReference Include="Npgsql" Version="10.*" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.OpenIdConnect" Version="10.*" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.*" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.*" />
   </ItemGroup>
 </Project>

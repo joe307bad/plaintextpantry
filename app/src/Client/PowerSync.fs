@@ -62,6 +62,8 @@ type BackendConnector =
 
 and [<Import("PowerSyncDatabase", "@powersync/web")>] PowerSyncDatabase(options: obj) =
     member _.connect(connector: BackendConnector) : JS.Promise<unit> = jsNative
+    /// Stops syncing and wipes the local database (sign-out).
+    member _.disconnectAndClear() : JS.Promise<unit> = jsNative
     member _.execute(sql: string, parameters: obj[]) : JS.Promise<obj> = jsNative
     member _.getAll<'Row>(sql: string, parameters: obj[]) : JS.Promise<'Row[]> = jsNative
     member _.getOptional<'Row>(sql: string, parameters: obj[]) : JS.Promise<'Row option> = jsNative

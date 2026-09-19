@@ -5,6 +5,10 @@ open Thoth.Json.Core
 /// What the PowerSync client needs to open a sync connection.
 type SyncCredentials = { Endpoint: string; Token: string }
 
+/// The signed-in user, as /api/auth/me reports it. `Id` is the Keycloak
+/// subject and is what every row's `user_id` holds.
+type User = { Id: string; Email: string; Name: string }
+
 /// One entry from the PowerSync client upload queue, in the shape the
 /// server applies to Postgres. Values are strings (or null); Postgres
 /// casts them to the real column types.
@@ -24,6 +28,15 @@ module Codec =
         Decode.object (fun get ->
             { Endpoint = get.Required.Field "endpoint" Decode.string
               Token = get.Required.Field "token" Decode.string })
+
+    let encodeUser (u: User) =
+        Encode.object [ "id", Encode.string u.Id; "email", Encode.string u.Email; "name", Encode.string u.Name ]
+
+    let decodeUser: Decoder<User> =
+        Decode.object (fun get ->
+            { Id = get.Required.Field "id" Decode.string
+              Email = get.Required.Field "email" Decode.string
+              Name = get.Required.Field "name" Decode.string })
 
     let encodeCrudOp (op: CrudOp) =
         Encode.object
@@ -51,3 +64,8 @@ module Codec =
 module Route =
     let syncCredentials = "/api/sync/credentials"
     let upload = "/api/sync/upload"
+    /// Browser navigations (not fetches): start the OIDC login / end the session.
+    let login = "/api/auth/login"
+    let logout = "/api/auth/logout"
+    /// 200 + User when signed in, 401 otherwise.
+    let me = "/api/auth/me"

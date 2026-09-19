@@ -34,6 +34,22 @@ module private Api =
                 return failwithf "%s %d: %s" response.Url response.Status body
         }
 
+    /// `Some user` when the session cookie is valid, `None` on 401.
+    let getMe () =
+        promise {
+            let! response = fetch Route.me []
+
+            if response.Status = 401 then
+                return None
+            else
+                let! response = ensureOk response
+                let! body = response.text ()
+
+                match Decode.fromString Codec.decodeUser body with
+                | Ok user -> return Some user
+                | Error err -> return failwithf "Bad /me response: %s" err
+        }
+
     let getSyncCredentials () =
         promise {
             let! response = fetch Route.syncCredentials [] |> Promise.bind ensureOk
@@ -107,6 +123,20 @@ let private connector =
             drain () }
 
 let connect () = db.connect connector
+
+let currentUser () = Api.getMe ()
+
+/// Ends the session: wipes local data (another account may sign in on this
+/// browser next), then hands the browser to the server, which clears the
+/// cookie and ends the Keycloak session.
+let signOut () =
+    promise {
+        do! db.disconnectAndClear ()
+        Browser.Dom.window.location.href <- Route.logout
+    }
+
+let signIn () =
+    Browser.Dom.window.location.href <- Route.login + "?returnTo=" + JS.encodeURIComponent Browser.Dom.window.location.pathname
 
 /// Live list of recipes; `onChange` fires with the full set on every change.
 let watchRecipes (onChange: Recipe list -> unit) =

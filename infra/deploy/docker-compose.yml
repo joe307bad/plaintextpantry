@@ -66,14 +66,67 @@ services:
       retries: 20
       start_period: 15s
 
+  # Identity provider at auth.<domain>. Brokers Google; owns the users; issues
+  # the browser's login and MCP access tokens. Realm provisioned by
+  # ./keycloak/provision.sh from deploy.sh.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7
+    restart: unless-stopped
+    # Plain `start` rebuilds Keycloak's optimized image on boot when KC_DB etc.
+    # changed - a minute on this box, and it saves maintaining our own image.
+    command: ["start"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: ${PG_USER}
+      KC_DB_PASSWORD: ${PG_PASSWORD}
+      # Every issuer/redirect URL Keycloak emits is built from this...
+      KC_HOSTNAME: https://auth.${DOMAIN}
+      # ...except backchannel ones (token, JWKS) when asked over the compose
+      # network, so the F# server talks to keycloak:8080 directly instead of
+      # looping out through the box's own public IP.
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      # 2 GB box shared with Postgres, PowerSync and the API.
+      JAVA_OPTS_KC_HEAP: "-Xms64m -Xmx384m"
+    healthcheck:
+      # Management port 9000. The image has no curl/wget; bash's /dev/tcp does.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q '200 OK' <&3
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 120s
+
   server:
     image: ${ECR_REGISTRY}/plaintextpantry/server:${IMAGE_TAG}
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
+      keycloak:
+        condition: service_healthy
     environment:
       SERVER_URL: http://0.0.0.0:5050
+      # Behind Caddy: trust X-Forwarded-Proto so redirect URIs and cookies are https.
+      ASPNETCORE_FORWARDEDHEADERS_ENABLED: "true"
+      APP_URL: https://${DOMAIN}
+      KEYCLOAK_ISSUER: https://auth.${DOMAIN}/realms/plaintextpantry
+      KEYCLOAK_METADATA_URL: http://keycloak:8080/realms/plaintextpantry
+      KEYCLOAK_CLIENT_ID: plaintextpantry-web
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET}
+      MCP_RESOURCE: https://${DOMAIN}/mcp
       PG_HOST: postgres
       PG_PORT: "5432"
       PG_USER: ${PG_USER}
@@ -89,6 +142,7 @@ services:
     depends_on:
       - server
       - powersync
+      - keycloak
     environment:
       DOMAIN: ${DOMAIN}
       CONFIG_HASH: ${CADDY_CONFIG_HASH} # same idea, for the Caddyfile

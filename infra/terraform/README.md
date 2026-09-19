@@ -1,19 +1,28 @@
 # Hosting plaintextpantry.com on AWS
 
 One arm64 EC2 box (`t4g.small`) running the production compose stack from
-[`infra/deploy`](../deploy): Postgres 16, the PowerSync service, the F# API
-and Caddy (auto-HTTPS, serves the static client). Roughly $15/month.
+[`infra/deploy`](../deploy): Postgres 16, the PowerSync service, Keycloak,
+the F# API and Caddy (auto-HTTPS, serves the static client). Roughly
+$15/month.
 
 ```
 GoDaddy (NS) ──▶ Route53 zone ──▶ Elastic IP
                                      │
                               ┌──────┴──────┐  EC2 t4g.small, Amazon Linux 2023
                               │    caddy    │  :80/:443  Let's Encrypt
-                              │  /api/* ────┼──▶ server   (ECR image)
-                              │  /powersync ┼──▶ powersync ──▶ postgres
-                              │  /*  static │                    │
+                              │  /api/* ────┼──▶ server   (ECR image) ──▶ postgres
+                              │  /mcp ──────┼──▶ server                     ▲
+                              │  /powersync ┼──▶ powersync ─────────────────┤
+                              │  /*  static │                               │
+                              │ auth.<dom> ─┼──▶ keycloak ──────────────────┘
                               └─────────────┘         /data (EBS, daily snapshots)
 ```
+
+**Identity**: Keycloak at `auth.plaintextpantry.com` owns the users and
+brokers Google sign-in. The F# server signs users in with OIDC (session
+cookie), mints per-user PowerSync tokens, and serves an OAuth-protected MCP
+endpoint at `/mcp`. Locally, `./dev.sh` runs the same Keycloak with a seeded
+`dev@localhost` / `dev` user instead of Google.
 
 | File | What it provisions |
 |---|---|
@@ -23,7 +32,7 @@ GoDaddy (NS) ──▶ Route53 zone ──▶ Elastic IP
 | `ec2.tf`, `user-data.sh` | The instance, Elastic IP, first-boot Docker install |
 | `storage.tf` | Persistent EBS data volume (`prevent_destroy`), daily DLM snapshots, S3 bucket for deploy bundles |
 | `ecr.tf` | Image repositories `plaintextpantry/server` and `plaintextpantry/web` |
-| `secrets.tf` | Generated Postgres password and PowerSync JWT secret → SSM Parameter Store |
+| `secrets.tf` | Generated Postgres password, PowerSync JWT secret, Keycloak admin password and client secret → SSM Parameter Store; placeholders for the Google OAuth client |
 | `iam.tf` | Instance role: SSM, ECR pull, read its secrets and bundles |
 
 ## One-time setup
@@ -52,8 +61,40 @@ GoDaddy (NS) ──▶ Route53 zone ──▶ Elastic IP
    minutes to a few hours. Caddy keeps retrying Let's Encrypt until the name
    resolves to the box, then the site is live at https://plaintextpantry.com.
 
+5. **Google sign-in.** Nobody can sign in to prod until this is done
+   (Keycloak has no users of its own there). In the
+   [Google Cloud console](https://console.cloud.google.com/apis/credentials):
+   *Create credentials → OAuth client ID → Web application*, with the
+   authorised redirect URI
+
+   ```
+   https://auth.plaintextpantry.com/realms/plaintextpantry/broker/google/endpoint
+   ```
+
+   (configure the OAuth consent screen first if the project has none). Then
+   store the client id and secret and redeploy:
+
+   ```sh
+   aws ssm put-parameter --overwrite --type SecureString --name /plaintextpantry/AUTH_GOOGLE_ID     --value '<client id>'
+   aws ssm put-parameter --overwrite --type SecureString --name /plaintextpantry/AUTH_GOOGLE_SECRET --value '<client secret>'
+   gh workflow run deploy.yml
+   ```
+
+   `deploy.sh` re-provisions the realm on every deploy, so the identity
+   provider appears (and the password form disappears) on the next run.
+
 Commit the `.terraform.lock.hcl` files (already present) so CI and local
 runs use the same provider builds.
+
+## Connecting Claude (MCP)
+
+Add a custom connector in Claude with the URL `https://plaintextpantry.com/mcp`.
+Claude reads `/.well-known/oauth-protected-resource/mcp`, registers itself
+with Keycloak (anonymous dynamic client registration is open to `claude.ai`),
+sends you through Google, and shows a consent screen listing the scopes
+(`recipes:read`, `recipes:write`, `shopping:read`, `shopping:write`). The
+tools then act as your account only. Locally the same works against
+`http://localhost:5050/mcp` with the dev user.
 
 ## What a merge to `main` does
 
@@ -62,9 +103,10 @@ nothing:
 
 - **`infra`** — `terraform plan -detailed-exitcode`; `apply` only runs when
   the plan is non-empty. The plan output in the job log is the diff.
-- **`build`** — images are tagged with `git rev-parse HEAD:app`, the tree hash
-  of `app/`. Same source ⇒ same tag ⇒ the build is skipped when the tag already
-  exists in ECR. Tags are immutable.
+- **`build`** — images (`infra/docker/images/Dockerfile.*`, context `app/`)
+  are tagged with a hash of the `app/` and `infra/docker/images/` git trees.
+  Same source ⇒ same tag ⇒ the build is skipped when the tag already exists
+  in ECR. Tags are immutable.
 - **`deploy`** — `infra/deploy` (plus `infra/docker/powersync` and
   `infra/docker/postgres`, shared with local dev) is tarred to S3 and applied
   on the box over SSM Run Command by [`deploy.sh`](../deploy/deploy.sh).
@@ -104,9 +146,19 @@ volume from it in `us-east-1a`, and swap the volume id in
 `rsync` `/data/postgres` across while the stack is down.
 
 **Schema changes**: `infra/docker/postgres/init` only runs when the Postgres
-data directory is empty (first boot of the data volume). Alter existing
-tables by hand through the SSM shell (`docker compose exec postgres psql -U
-postgres pantry`), the same way local dev does.
+data directory is empty (first boot of the data volume). Put re-runnable
+statements in `infra/docker/postgres/migrate.sql`; `deploy.sh` and `dev.sh`
+apply it on every start.
+
+**Rows from before sign-in existed** have `user_id = ''` and are visible to
+nobody. To hand them to an account, find its id (`/api/auth/me`, or the
+Keycloak console) and, in the SSM shell:
+`docker compose exec postgres psql -U postgres pantry -c "UPDATE recipes SET
+user_id='<id>' WHERE user_id=''"` (same for `shopping_items`).
+
+**Keycloak admin console**: `https://auth.plaintextpantry.com/admin/` as
+`admin` with `aws ssm get-parameter --with-decryption --name
+/plaintextpantry/KEYCLOAK_ADMIN_PASSWORD --query Parameter.Value --output text`.
 
 **Local plan without CI**: `cd infra/terraform && terraform init && terraform
 plan` uses your own credentials against the shared S3 state.
