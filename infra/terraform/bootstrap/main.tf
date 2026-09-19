@@ -23,9 +23,17 @@ variable "aws_region" {
   default = "us-east-1"
 }
 
-variable "github_repo" {
-  description = "owner/name of the repository allowed to assume the deploy role"
-  default     = "joe307bad/plaintextpantry"
+# GitHub's OIDC `sub` claim. This repo has immutable subject claims enabled
+# (owner and repo ids embedded, so a rename can't inherit the trust); check
+# with `gh api repos/<owner>/<repo>/actions/oidc/customization/sub`. The
+# plain form is listed too so the policy keeps working if that's turned off.
+variable "github_sub_prefixes" {
+  description = "sub claim prefixes (repo:...) allowed to assume the deploy role"
+  type        = list(string)
+  default = [
+    "repo:joe307bad@1916208/plaintextpantry@1377313617",
+    "repo:joe307bad/plaintextpantry",
+  ]
 }
 
 provider "aws" {
@@ -102,7 +110,7 @@ resource "aws_iam_role" "github_deploy" {
       Condition = {
         StringEquals = {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-          "token.actions.githubusercontent.com:sub" = "repo:${var.github_repo}:ref:refs/heads/main"
+          "token.actions.githubusercontent.com:sub" = [for p in var.github_sub_prefixes : "${p}:ref:refs/heads/main"]
         }
       }
     }]
