@@ -38,14 +38,22 @@ type RecipeForm = { Title: string; Body: string }
 type Model =
     { Page: Page
       Recipes: Recipe list
+      ShoppingItems: ShoppingItem list
       /// `Some` while the "New Recipe" modal is open.
       NewRecipe: RecipeForm option
       /// Detail-page form; `None` until the recipe being viewed has loaded.
-      Edit: RecipeForm option }
+      Edit: RecipeForm option
+      /// Recipe awaiting delete confirmation on the list page.
+      PendingDelete: string option }
 
 type Msg =
     | UrlChanged of string list
     | RecipesChanged of Recipe list
+    | ShoppingItemsChanged of ShoppingItem list
+    | AddToShoppingList of recipeId: string
+    | SetShoppingItemDone of id: string * isDone: bool
+    | DeleteShoppingItem of id: string
+    | ClearDoneShoppingItems
     | OpenNewRecipe
     | CloseNewRecipe
     | NewTitleChanged of string
@@ -54,6 +62,8 @@ type Msg =
     | EditTitleChanged of string
     | EditBodyChanged of string
     | SaveRecipe of id: string
+    | ConfirmDelete of id: string
+    | CancelDelete
     | DeleteRecipe of id: string
     | Ignore
 
@@ -64,7 +74,7 @@ let private parseUrl (segments: string list) =
     | [ "shopping-list" ] -> ShoppingList
     | _ -> NotFound
 
-let private fireAndForget (work: JS.Promise<obj>) =
+let private fireAndForget (work: JS.Promise<'a>) =
     Cmd.OfPromise.either (fun () -> work) () (fun _ -> Ignore) (fun err ->
         Browser.Dom.console.error err
         Ignore)
@@ -72,10 +82,13 @@ let private fireAndForget (work: JS.Promise<obj>) =
 let init () =
     { Page = parseUrl (Router.currentUrl ())
       Recipes = []
+      ShoppingItems = []
       NewRecipe = None
-      Edit = None },
+      Edit = None
+      PendingDelete = None },
     Cmd.batch
         [ Cmd.ofEffect (fun dispatch -> Db.watchRecipes (RecipesChanged >> dispatch))
+          Cmd.ofEffect (fun dispatch -> Db.watchShoppingItems (ShoppingItemsChanged >> dispatch))
           Cmd.ofEffect (fun dispatch -> Router.onUrlChanged (UrlChanged >> dispatch))
           Cmd.ofEffect (fun _ -> Db.connect () |> Promise.catch (fun e -> console.error e) |> ignore) ]
 
@@ -103,6 +116,16 @@ let update msg model =
             | _ -> model.Edit
 
         { model with Recipes = recipes; Edit = edit }, Cmd.none
+    | ShoppingItemsChanged items -> { model with ShoppingItems = items }, Cmd.none
+    | AddToShoppingList id ->
+        match findRecipe id model.Recipes with
+        | Some recipe ->
+            let ingredients = Cooklang.ingredients (Cooklang.parse recipe.body).Recipe
+            model, fireAndForget (Db.addToShoppingList ingredients)
+        | None -> model, Cmd.none
+    | SetShoppingItemDone(id, isDone) -> model, fireAndForget (Db.setShoppingItemDone id isDone)
+    | DeleteShoppingItem id -> model, fireAndForget (Db.deleteShoppingItem id)
+    | ClearDoneShoppingItems -> model, fireAndForget (Db.clearDoneShoppingItems ())
     | OpenNewRecipe -> { model with NewRecipe = Some { Title = ""; Body = "" } }, Cmd.none
     | CloseNewRecipe -> { model with NewRecipe = None }, Cmd.none
     | NewTitleChanged title ->
@@ -122,9 +145,16 @@ let update msg model =
         match model.Edit with
         | Some r when r.Title.Trim() <> "" -> model, fireAndForget (Db.updateRecipe id (r.Title.Trim()) r.Body)
         | _ -> model, Cmd.none
+    | ConfirmDelete id -> { model with PendingDelete = Some id }, Cmd.none
+    | CancelDelete -> { model with PendingDelete = None }, Cmd.none
     | DeleteRecipe id ->
-        Router.navigate []
-        { model with Page = RecipeList; Edit = None }, fireAndForget (Db.deleteRecipe id)
+        if model.Page <> RecipeList then Router.navigate []
+
+        { model with
+            Page = RecipeList
+            Edit = None
+            PendingDelete = None },
+        fireAndForget (Db.deleteRecipe id)
     | Ignore -> model, Cmd.none
 
 /// Anchor that navigates in-app (real href, so open-in-new-tab still works).
@@ -196,6 +226,31 @@ let private newRecipeModal (recipe: RecipeForm) (known: CooklangEditor.KnownName
                                               prop.className "rounded bg-blue-600 px-3 py-1 text-white hover:bg-blue-700"
                                               prop.text "Save" ] ] ] ] ] ] ]
 
+let private confirmDeleteModal (recipe: Recipe) dispatch =
+    Html.div
+        [ prop.className "fixed inset-0 flex items-center justify-center bg-black/50"
+          prop.onClick (fun _ -> dispatch CancelDelete)
+          prop.children
+              [ Html.div
+                    [ prop.className "w-full max-w-sm rounded bg-white p-4 flex flex-col gap-3"
+                      prop.onClick (fun e -> e.stopPropagation ())
+                      prop.children
+                          [ Html.p [ prop.text $"Delete \"{recipe.title}\"?" ]
+                            Html.div
+                                [ prop.className "flex justify-end gap-2"
+                                  prop.children
+                                      [ Html.button
+                                            [ prop.type' "button"
+                                              prop.className "rounded px-3 py-1 text-gray-600 hover:text-gray-900"
+                                              prop.text "Cancel"
+                                              prop.autoFocus true
+                                              prop.onClick (fun _ -> dispatch CancelDelete) ]
+                                        Html.button
+                                            [ prop.type' "button"
+                                              prop.className "rounded bg-red-600 px-3 py-1 text-white hover:bg-red-700"
+                                              prop.text "Delete"
+                                              prop.onClick (fun _ -> dispatch (DeleteRecipe recipe.id)) ] ] ] ] ] ] ]
+
 let private listPage (model: Model) (known: CooklangEditor.KnownNames) dispatch =
     Html.div
         [ Html.button
@@ -207,10 +262,24 @@ let private listPage (model: Model) (known: CooklangEditor.KnownNames) dispatch 
           | [] -> Html.p "No recipes yet."
           | recipes ->
               Html.ul
-                  [ for r in recipes ->
-                        Html.li [ linkWith "text-blue-600 underline hover:text-blue-800" dispatch [ "recipe"; r.id ] r.title ] ]
+                  [ prop.className "flex flex-col gap-1"
+                    prop.children
+                        [ for r in recipes ->
+                              Html.li
+                                  [ prop.className "flex items-center gap-2"
+                                    prop.children
+                                        [ Html.button
+                                              [ prop.type' "button"
+                                                prop.className "px-1 text-gray-400 hover:text-red-600"
+                                                prop.title "Delete recipe"
+                                                prop.text "×"
+                                                prop.onClick (fun _ -> dispatch (ConfirmDelete r.id)) ]
+                                          linkWith "text-blue-600 underline hover:text-blue-800" dispatch [ "recipe"; r.id ] r.title ] ] ] ]
           match model.NewRecipe with
           | Some recipe -> newRecipeModal recipe known dispatch
+          | None -> Html.none
+          match model.PendingDelete |> Option.bind (fun id -> findRecipe id model.Recipes) with
+          | Some recipe -> confirmDeleteModal recipe dispatch
           | None -> Html.none ]
 
 let private detailPage (model: Model) (id: string) (known: CooklangEditor.KnownNames) dispatch =
@@ -236,10 +305,18 @@ let private detailPage (model: Model) (id: string) (known: CooklangEditor.KnownN
                           Html.div
                               [ prop.className "flex justify-between"
                                 prop.children
-                                    [ Html.button
-                                          [ prop.type' "submit"
-                                            prop.className "rounded bg-blue-600 px-3 py-1 text-white hover:bg-blue-700"
-                                            prop.text "Save" ]
+                                    [ Html.div
+                                          [ prop.className "flex gap-2"
+                                            prop.children
+                                                [ Html.button
+                                                      [ prop.type' "submit"
+                                                        prop.className "rounded bg-blue-600 px-3 py-1 text-white hover:bg-blue-700"
+                                                        prop.text "Save" ]
+                                                  Html.button
+                                                      [ prop.type' "button"
+                                                        prop.className "rounded border border-gray-300 px-3 py-1 text-gray-700 hover:bg-gray-50"
+                                                        prop.text "Add to shopping list"
+                                                        prop.onClick (fun _ -> dispatch (AddToShoppingList id)) ] ] ]
                                       Html.button
                                           [ prop.type' "button"
                                             prop.className "rounded px-3 py-1 text-red-600 hover:text-red-800"
@@ -249,6 +326,47 @@ let private detailPage (model: Model) (id: string) (known: CooklangEditor.KnownN
         Html.div
             [ Html.p "Recipe not found (it may still be syncing, or it was deleted)."
               link dispatch [] "Back to recipes" ]
+
+let private shoppingListPage (model: Model) dispatch =
+    match model.ShoppingItems with
+    | [] -> Html.p "Nothing to buy."
+    | items ->
+        let anyDone = items |> List.exists (fun i -> i.``done`` <> 0)
+
+        Html.div
+            [ Html.button
+                  [ prop.type' "button"
+                    prop.className "mb-3 rounded border border-gray-300 px-3 py-1 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                    prop.text "Clear checked"
+                    prop.disabled (not anyDone)
+                    prop.onClick (fun _ -> dispatch ClearDoneShoppingItems) ]
+              Html.ul
+                  [ prop.className "flex flex-col gap-1"
+                    prop.children
+                        [ for item in items ->
+                              let isDone = item.``done`` <> 0
+
+                              Html.li
+                                  [ prop.className "flex items-center gap-2"
+                                    prop.children
+                                        [ Html.input
+                                              [ prop.type' "checkbox"
+                                                prop.isChecked isDone
+                                                prop.onChange (fun (checked: bool) ->
+                                                    dispatch (SetShoppingItemDone(item.id, checked))) ]
+                                          Html.span
+                                              [ prop.className (if isDone then "text-gray-400 line-through" else "")
+                                                prop.text (
+                                                    [ item.quantity; item.unit; item.name ]
+                                                    |> List.filter ((<>) "")
+                                                    |> String.concat " "
+                                                ) ]
+                                          Html.button
+                                              [ prop.type' "button"
+                                                prop.className "ml-auto px-2 text-gray-400 hover:text-red-600"
+                                                prop.title "Remove"
+                                                prop.text "×"
+                                                prop.onClick (fun _ -> dispatch (DeleteShoppingItem item.id)) ] ] ] ] ] ]
 
 [<ReactComponent>]
 let View () =
@@ -275,7 +393,7 @@ let View () =
                     [ match model.Page with
                       | RecipeList -> listPage model known dispatch
                       | RecipeDetail id -> detailPage model id known dispatch
-                      | ShoppingList -> Html.p "Hello world"
+                      | ShoppingList -> shoppingListPage model dispatch
                       | NotFound -> Html.p "Page not found." ] ] ]
 
 let root = ReactDOM.createRoot (document.getElementById "root")

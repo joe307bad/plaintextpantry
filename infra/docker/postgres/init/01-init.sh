@@ -16,5 +16,15 @@ CREATE TABLE recipes (
     created_at  timestamptz NOT NULL DEFAULT now()
 );
 
+-- One row per ingredient line; `quantity` is text so "some" / "few" survive.
+CREATE TABLE shopping_items (
+    id          uuid PRIMARY KEY,
+    name        text NOT NULL,
+    quantity    text NOT NULL DEFAULT '',
+    unit        text NOT NULL DEFAULT '',
+    done        integer NOT NULL DEFAULT 0,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE PUBLICATION powersync FOR ALL TABLES;
 SQL

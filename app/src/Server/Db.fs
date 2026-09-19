@@ -9,7 +9,10 @@ open Shared
 /// Tables the client may write to, with the Postgres type of each writable
 /// column. Anything not listed here is rejected. `id` is always a uuid.
 let private tables =
-    Map [ "recipes", [ "title", "text"; "body", "text"; "created_at", "timestamptz" ] ]
+    Map
+        [ "recipes", [ "title", "text"; "body", "text"; "created_at", "timestamptz" ]
+          "shopping_items",
+          [ "name", "text"; "quantity", "text"; "unit", "text"; "done", "integer"; "created_at", "timestamptz" ] ]
 
 let private param (cmd: NpgsqlCommand) (name: string) (value: string option) =
     let v : obj =

@@ -14,6 +14,15 @@ open PowerSync
 /// Row shape of the local `recipes` table. Field names match SQLite columns.
 type Recipe = { id: string; title: string; body: string; created_at: string }
 
+/// Row shape of the local `shopping_items` table. `quantity` is text so "some" survives; `done` is 0/1.
+type ShoppingItem =
+    { id: string
+      name: string
+      quantity: string
+      unit: string
+      ``done``: int
+      created_at: string }
+
 /// Calls to the F# server, using the coders shared with it.
 module private Api =
     let private ensureOk (response: Response) =
@@ -48,7 +57,15 @@ module private Api =
 let private nowIso () : string = jsNative
 
 let db =
-    database "plaintextpantry.sqlite" [ "recipes", [ "title", column.text; "body", column.text; "created_at", column.text ] ]
+    database
+        "plaintextpantry.sqlite"
+        [ "recipes", [ "title", column.text; "body", column.text; "created_at", column.text ]
+          "shopping_items",
+          [ "name", column.text
+            "quantity", column.text
+            "unit", column.text
+            "done", column.integer
+            "created_at", column.text ] ]
 
 let private toCrudOp (entry: CrudEntry) : CrudOp =
     let data =
@@ -105,6 +122,19 @@ let watchRecipes (onChange: Recipe list -> unit) =
             member _.onError(err) = JS.console.error ("watch recipes", err) }
     |> ignore
 
+/// Live shopping list: unchecked items first, oldest first within each group.
+let watchShoppingItems (onChange: ShoppingItem list -> unit) =
+    let sql =
+        "SELECT id, name, quantity, unit, done, created_at FROM shopping_items ORDER BY done, created_at"
+
+    let query = db.query<ShoppingItem> {| sql = sql; parameters = [||] |}
+
+    query.watch().registerListener
+        { new WatchedQueryListener<ShoppingItem> with
+            member _.onData(rows) = onChange (List.ofArray rows)
+            member _.onError(err) = JS.console.error ("watch shopping items", err) }
+    |> ignore
+
 let watchStatus (onChange: SyncStatus -> unit) =
     onChange db.currentStatus
     db.registerListener (createObj [ "statusChanged" ==> onChange ]) |> ignore
@@ -120,3 +150,53 @@ let updateRecipe (id: string) (title: string) (body: string) =
 
 let deleteRecipe (id: string) =
     db.execute ("DELETE FROM recipes WHERE id = ?", [| id |])
+
+type private Quantity = Cooklang.Quantity
+
+let private quantityText (quantity: Quantity option) =
+    match quantity with
+    | Some(Quantity.Number n) -> string n
+    | Some(Quantity.Text t) -> t
+    | None -> ""
+
+/// One row per ingredient. An unchecked row with the same name and unit is
+/// topped up instead when both quantities are numbers, so adding two recipes
+/// that need flour gives one line, not two.
+let addToShoppingList (ingredients: Cooklang.Ingredient list) =
+    promise {
+        for i in ingredients do
+            let unit = defaultArg i.Unit ""
+
+            let! existing =
+                db.getOptional<ShoppingItem> (
+                    "SELECT id, name, quantity, unit, done, created_at FROM shopping_items WHERE lower(name) = lower(?) AND unit = ? AND done = 0",
+                    [| i.Name; unit |]
+                )
+
+            match existing, i.Quantity with
+            | Some row, Some(Quantity.Number n) when fst (Double.TryParse row.quantity) ->
+                let! _ =
+                    db.execute (
+                        "UPDATE shopping_items SET quantity = ? WHERE id = ?",
+                        [| string (float row.quantity + n); row.id |]
+                    )
+
+                ()
+            | _ ->
+                let! _ =
+                    db.execute (
+                        "INSERT INTO shopping_items (id, name, quantity, unit, done, created_at) VALUES (?, ?, ?, ?, 0, ?)",
+                        [| string (Guid.NewGuid()); i.Name; quantityText i.Quantity; unit; nowIso () |]
+                    )
+
+                ()
+    }
+
+let setShoppingItemDone (id: string) (isDone: bool) =
+    db.execute ("UPDATE shopping_items SET done = ? WHERE id = ?", [| (if isDone then 1 else 0); id |])
+
+let deleteShoppingItem (id: string) =
+    db.execute ("DELETE FROM shopping_items WHERE id = ?", [| id |])
+
+let clearDoneShoppingItems () =
+    db.execute ("DELETE FROM shopping_items WHERE done <> 0", [||])

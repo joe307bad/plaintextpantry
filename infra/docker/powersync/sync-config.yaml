@@ -9,3 +9,6 @@ streams:
   recipes:
     auto_subscribe: true
     query: SELECT * FROM recipes
+  shopping_items:
+    auto_subscribe: true
+    query: SELECT * FROM shopping_items
