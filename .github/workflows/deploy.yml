@@ -33,7 +33,10 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
-      - run: dotnet test --project app/tests/Shared.Tests
+      # From app/ so app/global.json (MTP runner mode) applies; without it
+      # `--project` is not a recognised switch.
+      - run: dotnet test --project tests/Shared.Tests
+        working-directory: app
 
   infra:
     runs-on: ubuntu-latest
