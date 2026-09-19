@@ -7,7 +7,7 @@ open Feliz
 open Feliz.UseElmish
 open Db
 
-/// Tiny path router over the History API: "/recipes/<id>" <-> ["recipes"; "<id>"].
+/// Tiny path router over the History API: "/recipe/<id>" <-> ["recipe"; "<id>"].
 /// Back/forward fire `popstate`; in-app navigation pushes state and the
 /// caller dispatches `UrlChanged` itself, so there is one source of truth.
 module Router =
@@ -32,14 +32,16 @@ type Page =
     | ShoppingList
     | NotFound
 
-/// Contents of the "New Recipe" modal while it is open.
-type NewRecipe = { Title: string; Body: string }
+/// Editable recipe fields, used by both the "New Recipe" modal and the detail page.
+type RecipeForm = { Title: string; Body: string }
 
 type Model =
     { Page: Page
       Recipes: Recipe list
-      NewRecipe: NewRecipe option
-      EditTitle: string }
+      /// `Some` while the "New Recipe" modal is open.
+      NewRecipe: RecipeForm option
+      /// Detail-page form; `None` until the recipe being viewed has loaded.
+      Edit: RecipeForm option }
 
 type Msg =
     | UrlChanged of string list
@@ -50,14 +52,15 @@ type Msg =
     | NewBodyChanged of string
     | AddRecipe
     | EditTitleChanged of string
-    | SaveTitle of id: string
+    | EditBodyChanged of string
+    | SaveRecipe of id: string
     | DeleteRecipe of id: string
     | Ignore
 
 let private parseUrl (segments: string list) =
     match segments with
     | [] -> RecipeList
-    | [ "recipes"; id ] -> RecipeDetail id
+    | [ "recipe"; id ] -> RecipeDetail id
     | [ "shopping-list" ] -> ShoppingList
     | _ -> NotFound
 
@@ -70,7 +73,7 @@ let init () =
     { Page = parseUrl (Router.currentUrl ())
       Recipes = []
       NewRecipe = None
-      EditTitle = "" },
+      Edit = None },
     Cmd.batch
         [ Cmd.ofEffect (fun dispatch -> Db.watchRecipes (RecipesChanged >> dispatch))
           Cmd.ofEffect (fun dispatch -> Router.onUrlChanged (UrlChanged >> dispatch))
@@ -79,26 +82,27 @@ let init () =
 let private findRecipe id (recipes: Recipe list) =
     recipes |> List.tryFind (fun r -> r.id = id)
 
+let private formOf (recipe: Recipe) = { Title = recipe.title; Body = recipe.body }
+
 let update msg model =
     match msg with
     | UrlChanged segments ->
         let page = parseUrl segments
 
-        let editTitle =
+        let edit =
             match page with
-            | RecipeDetail id -> findRecipe id model.Recipes |> Option.map (fun r -> r.title) |> Option.defaultValue ""
-            | _ -> ""
+            | RecipeDetail id -> findRecipe id model.Recipes |> Option.map formOf
+            | _ -> None
 
-        { model with Page = page; EditTitle = editTitle }, Cmd.none
+        { model with Page = page; Edit = edit }, Cmd.none
     | RecipesChanged recipes ->
-        // Keep the edit box in step with the synced title unless the user is mid-edit.
-        let editTitle =
-            match model.Page with
-            | RecipeDetail id when model.EditTitle = "" ->
-                findRecipe id recipes |> Option.map (fun r -> r.title) |> Option.defaultValue ""
-            | _ -> model.EditTitle
+        // Populate the detail form once the recipe arrives; never clobber an in-progress edit.
+        let edit =
+            match model.Page, model.Edit with
+            | RecipeDetail id, None -> findRecipe id recipes |> Option.map formOf
+            | _ -> model.Edit
 
-        { model with Recipes = recipes; EditTitle = editTitle }, Cmd.none
+        { model with Recipes = recipes; Edit = edit }, Cmd.none
     | OpenNewRecipe -> { model with NewRecipe = Some { Title = ""; Body = "" } }, Cmd.none
     | CloseNewRecipe -> { model with NewRecipe = None }, Cmd.none
     | NewTitleChanged title ->
@@ -110,14 +114,17 @@ let update msg model =
         | Some r when r.Title.Trim() <> "" ->
             { model with NewRecipe = None }, fireAndForget (Db.addRecipe (r.Title.Trim()) r.Body)
         | _ -> model, Cmd.none
-    | EditTitleChanged title -> { model with EditTitle = title }, Cmd.none
-    | SaveTitle id ->
-        match model.EditTitle.Trim() with
-        | "" -> model, Cmd.none
-        | title -> model, fireAndForget (Db.renameRecipe id title)
+    | EditTitleChanged title ->
+        { model with Edit = model.Edit |> Option.map (fun r -> { r with Title = title }) }, Cmd.none
+    | EditBodyChanged body ->
+        { model with Edit = model.Edit |> Option.map (fun r -> { r with Body = body }) }, Cmd.none
+    | SaveRecipe id ->
+        match model.Edit with
+        | Some r when r.Title.Trim() <> "" -> model, fireAndForget (Db.updateRecipe id (r.Title.Trim()) r.Body)
+        | _ -> model, Cmd.none
     | DeleteRecipe id ->
         Router.navigate []
-        { model with Page = RecipeList; EditTitle = "" }, fireAndForget (Db.deleteRecipe id)
+        { model with Page = RecipeList; Edit = None }, fireAndForget (Db.deleteRecipe id)
     | Ignore -> model, Cmd.none
 
 /// Anchor that navigates in-app (real href, so open-in-new-tab still works).
@@ -153,7 +160,7 @@ let private navBar (page: Page) dispatch =
               [ navLink [] "Recipes" onRecipes
                 navLink [ "shopping-list" ] "Shopping list" (page = ShoppingList) ] ]
 
-let private newRecipeModal (recipe: NewRecipe) dispatch =
+let private newRecipeModal (recipe: RecipeForm) dispatch =
     let field = "w-full rounded border border-gray-300 px-2 py-1"
 
     Html.div
@@ -206,45 +213,52 @@ let private listPage (model: Model) dispatch =
           | recipes ->
               Html.ul
                   [ for r in recipes ->
-                        Html.li [ linkWith "text-blue-600 underline hover:text-blue-800" dispatch [ "recipes"; r.id ] r.title ] ]
+                        Html.li [ linkWith "text-blue-600 underline hover:text-blue-800" dispatch [ "recipe"; r.id ] r.title ] ]
           match model.NewRecipe with
           | Some recipe -> newRecipeModal recipe dispatch
           | None -> Html.none ]
 
 let private detailPage (model: Model) (id: string) dispatch =
-    match findRecipe id model.Recipes with
-    | None ->
+    match findRecipe id model.Recipes, model.Edit with
+    | Some _, Some edit ->
+        let field = "w-full rounded border border-gray-300 px-2 py-1"
+
+        Html.div
+            [ Html.p [ prop.className "mb-3"; prop.children [ link dispatch [] "← All recipes" ] ]
+              Html.form
+                  [ prop.className "max-w-2xl flex flex-col gap-3"
+                    prop.onSubmit (fun e ->
+                        e.preventDefault ()
+                        dispatch (SaveRecipe id))
+                    prop.children
+                        [ Html.input
+                              [ prop.className (field + " text-lg font-semibold")
+                                prop.type' "text"
+                                prop.placeholder "Title"
+                                prop.value edit.Title
+                                prop.onChange (EditTitleChanged >> dispatch) ]
+                          Html.textarea
+                              [ prop.className field
+                                prop.rows 12
+                                prop.placeholder "Recipe"
+                                prop.value edit.Body
+                                prop.onChange (EditBodyChanged >> dispatch) ]
+                          Html.div
+                              [ prop.className "flex justify-between"
+                                prop.children
+                                    [ Html.button
+                                          [ prop.type' "submit"
+                                            prop.className "rounded bg-blue-600 px-3 py-1 text-white hover:bg-blue-700"
+                                            prop.text "Save" ]
+                                      Html.button
+                                          [ prop.type' "button"
+                                            prop.className "rounded px-3 py-1 text-red-600 hover:text-red-800"
+                                            prop.text "Delete"
+                                            prop.onClick (fun _ -> dispatch (DeleteRecipe id)) ] ] ] ] ] ]
+    | _ ->
         Html.div
             [ Html.p "Recipe not found (it may still be syncing, or it was deleted)."
               link dispatch [] "Back to recipes" ]
-    | Some recipe ->
-        Html.div
-            [ Html.p [ link dispatch [] "← All recipes" ]
-              Html.h2 recipe.title
-              Html.pre [ prop.className "whitespace-pre-wrap font-sans"; prop.text recipe.body ]
-              Html.dl
-                  [ Html.dt "Created"
-                    Html.dd recipe.created_at
-                    Html.dt "Id"
-                    Html.dd [ Html.code recipe.id ] ]
-              Html.form
-                  [ prop.onSubmit (fun e ->
-                        e.preventDefault ()
-                        dispatch (SaveTitle recipe.id))
-                    prop.children
-                        [ Html.label [ prop.htmlFor "edit-title"; prop.text "Rename " ]
-                          Html.input
-                              [ prop.id "edit-title"
-                                prop.type' "text"
-                                prop.value model.EditTitle
-                                prop.onChange (EditTitleChanged >> dispatch) ]
-                          Html.text " "
-                          Html.button [ prop.type' "submit"; prop.text "Save" ] ] ]
-              Html.p
-                  [ Html.button
-                        [ prop.type' "button"
-                          prop.text "Delete recipe"
-                          prop.onClick (fun _ -> dispatch (DeleteRecipe recipe.id)) ] ] ]
 
 [<ReactComponent>]
 let View () =

@@ -112,8 +112,8 @@ let addRecipe (title: string) (body: string) =
         [| string (Guid.NewGuid()); title; body; nowIso () |]
     )
 
-let renameRecipe (id: string) (title: string) =
-    db.execute ("UPDATE recipes SET title = ? WHERE id = ?", [| title; id |])
+let updateRecipe (id: string) (title: string) (body: string) =
+    db.execute ("UPDATE recipes SET title = ?, body = ? WHERE id = ?", [| title; body; id |])
 
 let deleteRecipe (id: string) =
     db.execute ("DELETE FROM recipes WHERE id = ?", [| id |])
