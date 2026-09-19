@@ -12,6 +12,7 @@ psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<'SQL'
 CREATE TABLE recipes (
     id          uuid PRIMARY KEY,
     title       text NOT NULL,
+    body        text NOT NULL DEFAULT '',
     created_at  timestamptz NOT NULL DEFAULT now()
 );
 

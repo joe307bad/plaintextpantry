@@ -29,20 +29,25 @@ module Router =
 type Page =
     | RecipeList
     | RecipeDetail of id: string
+    | ShoppingList
     | NotFound
+
+/// Contents of the "New Recipe" modal while it is open.
+type NewRecipe = { Title: string; Body: string }
 
 type Model =
     { Page: Page
       Recipes: Recipe list
-      NewTitle: string
-      EditTitle: string
-      Status: PowerSync.SyncStatus option }
+      NewRecipe: NewRecipe option
+      EditTitle: string }
 
 type Msg =
     | UrlChanged of string list
     | RecipesChanged of Recipe list
-    | StatusChanged of PowerSync.SyncStatus
+    | OpenNewRecipe
+    | CloseNewRecipe
     | NewTitleChanged of string
+    | NewBodyChanged of string
     | AddRecipe
     | EditTitleChanged of string
     | SaveTitle of id: string
@@ -53,6 +58,7 @@ let private parseUrl (segments: string list) =
     match segments with
     | [] -> RecipeList
     | [ "recipes"; id ] -> RecipeDetail id
+    | [ "shopping-list" ] -> ShoppingList
     | _ -> NotFound
 
 let private fireAndForget (work: JS.Promise<obj>) =
@@ -63,12 +69,10 @@ let private fireAndForget (work: JS.Promise<obj>) =
 let init () =
     { Page = parseUrl (Router.currentUrl ())
       Recipes = []
-      NewTitle = ""
-      EditTitle = ""
-      Status = None },
+      NewRecipe = None
+      EditTitle = "" },
     Cmd.batch
         [ Cmd.ofEffect (fun dispatch -> Db.watchRecipes (RecipesChanged >> dispatch))
-          Cmd.ofEffect (fun dispatch -> Db.watchStatus (StatusChanged >> dispatch))
           Cmd.ofEffect (fun dispatch -> Router.onUrlChanged (UrlChanged >> dispatch))
           Cmd.ofEffect (fun _ -> Db.connect () |> Promise.catch (fun e -> console.error e) |> ignore) ]
 
@@ -95,12 +99,17 @@ let update msg model =
             | _ -> model.EditTitle
 
         { model with Recipes = recipes; EditTitle = editTitle }, Cmd.none
-    | StatusChanged status -> { model with Status = Some status }, Cmd.none
-    | NewTitleChanged title -> { model with NewTitle = title }, Cmd.none
+    | OpenNewRecipe -> { model with NewRecipe = Some { Title = ""; Body = "" } }, Cmd.none
+    | CloseNewRecipe -> { model with NewRecipe = None }, Cmd.none
+    | NewTitleChanged title ->
+        { model with NewRecipe = model.NewRecipe |> Option.map (fun r -> { r with Title = title }) }, Cmd.none
+    | NewBodyChanged body ->
+        { model with NewRecipe = model.NewRecipe |> Option.map (fun r -> { r with Body = body }) }, Cmd.none
     | AddRecipe ->
-        match model.NewTitle.Trim() with
-        | "" -> model, Cmd.none
-        | title -> { model with NewTitle = "" }, fireAndForget (Db.addRecipe title)
+        match model.NewRecipe with
+        | Some r when r.Title.Trim() <> "" ->
+            { model with NewRecipe = None }, fireAndForget (Db.addRecipe (r.Title.Trim()) r.Body)
+        | _ -> model, Cmd.none
     | EditTitleChanged title -> { model with EditTitle = title }, Cmd.none
     | SaveTitle id ->
         match model.EditTitle.Trim() with
@@ -112,63 +121,95 @@ let update msg model =
     | Ignore -> model, Cmd.none
 
 /// Anchor that navigates in-app (real href, so open-in-new-tab still works).
-let private link dispatch (segments: string list) (text: string) =
+let private linkWith (className: string) dispatch (segments: string list) (text: string) =
     Html.a
         [ prop.href (Router.format segments)
+          prop.className className
           prop.text text
           prop.onClick (fun e ->
               e.preventDefault ()
               Router.navigate segments
               dispatch (UrlChanged segments)) ]
 
-let private statusLine (status: PowerSync.SyncStatus option) =
-    let flags =
-        match status with
-        | None -> "starting"
-        | Some s ->
-            [ (if s.connected then "connected" elif s.connecting then "connecting" else "offline")
-              (if s.uploading then "uploading" else "")
-              (if s.downloading then "downloading" else "")
-              (if s.hasSynced = Some true then "synced" else "not yet synced") ]
-            |> List.filter ((<>) "")
-            |> String.concat ", "
+let private link dispatch = linkWith "" dispatch
 
-    let errors =
-        match status with
-        | None -> []
-        | Some s ->
-            [ s.uploadError |> Option.map (fun e -> "upload failed: " + e.Message)
-              s.downloadError |> Option.map (fun e -> "download failed: " + e.Message) ]
-            |> List.choose id
+let private navBar (page: Page) dispatch =
+    let navLink segments text isActive =
+        linkWith
+            (if isActive then "font-semibold text-gray-900" else "text-gray-500 hover:text-gray-900")
+            dispatch
+            segments
+            text
+
+    let onRecipes =
+        match page with
+        | RecipeList
+        | RecipeDetail _ -> true
+        | _ -> false
+
+    Html.nav
+        [ prop.className "flex gap-6 border-b border-gray-200 px-4 py-3"
+          prop.children
+              [ navLink [] "Recipes" onRecipes
+                navLink [ "shopping-list" ] "Shopping list" (page = ShoppingList) ] ]
+
+let private newRecipeModal (recipe: NewRecipe) dispatch =
+    let field = "w-full rounded border border-gray-300 px-2 py-1"
 
     Html.div
-        [ yield Html.p [ Html.small [ prop.text ("sync: " + flags) ] ]
-          for err in errors -> Html.p [ Html.small [ prop.text err ] ] ]
+        [ prop.className "fixed inset-0 flex items-center justify-center bg-black/50"
+          prop.onClick (fun _ -> dispatch CloseNewRecipe)
+          prop.children
+              [ Html.form
+                    [ prop.className "w-full max-w-md rounded bg-white p-4 flex flex-col gap-3"
+                      prop.onClick (fun e -> e.stopPropagation ())
+                      prop.onSubmit (fun e ->
+                          e.preventDefault ()
+                          dispatch AddRecipe)
+                      prop.children
+                          [ Html.h2 [ prop.className "text-lg font-semibold"; prop.text "New Recipe" ]
+                            Html.input
+                                [ prop.className field
+                                  prop.type' "text"
+                                  prop.placeholder "Title"
+                                  prop.autoFocus true
+                                  prop.value recipe.Title
+                                  prop.onChange (NewTitleChanged >> dispatch) ]
+                            Html.textarea
+                                [ prop.className field
+                                  prop.rows 8
+                                  prop.placeholder "Recipe"
+                                  prop.value recipe.Body
+                                  prop.onChange (NewBodyChanged >> dispatch) ]
+                            Html.div
+                                [ prop.className "flex justify-end gap-2"
+                                  prop.children
+                                      [ Html.button
+                                            [ prop.type' "button"
+                                              prop.className "rounded px-3 py-1 text-gray-600 hover:text-gray-900"
+                                              prop.text "Cancel"
+                                              prop.onClick (fun _ -> dispatch CloseNewRecipe) ]
+                                        Html.button
+                                            [ prop.type' "submit"
+                                              prop.className "rounded bg-blue-600 px-3 py-1 text-white hover:bg-blue-700"
+                                              prop.text "Save" ] ] ] ] ] ] ]
 
 let private listPage (model: Model) dispatch =
     Html.div
-        [ Html.form
-              [ prop.onSubmit (fun e ->
-                    e.preventDefault ()
-                    dispatch AddRecipe)
-                prop.children
-                    [ Html.label
-                          [ prop.htmlFor "recipe-title"
-                            prop.text "Recipe Title " ]
-                      Html.input
-                          [ prop.id "recipe-title"
-                            prop.type' "text"
-                            prop.value model.NewTitle
-                            prop.onChange (NewTitleChanged >> dispatch) ]
-                      Html.text " "
-                      Html.button [ prop.type' "submit"; prop.text "Add Recipe" ] ] ]
-          Html.h2 "Recipes"
+        [ Html.button
+              [ prop.type' "button"
+                prop.className "mb-3 rounded bg-blue-600 px-3 py-1 text-white hover:bg-blue-700"
+                prop.text "New Recipe"
+                prop.onClick (fun _ -> dispatch OpenNewRecipe) ]
           match model.Recipes with
           | [] -> Html.p "No recipes yet."
           | recipes ->
               Html.ul
                   [ for r in recipes ->
-                        Html.li [ link dispatch [ "recipes"; r.id ] r.title ] ] ]
+                        Html.li [ linkWith "text-blue-600 underline hover:text-blue-800" dispatch [ "recipes"; r.id ] r.title ] ]
+          match model.NewRecipe with
+          | Some recipe -> newRecipeModal recipe dispatch
+          | None -> Html.none ]
 
 let private detailPage (model: Model) (id: string) dispatch =
     match findRecipe id model.Recipes with
@@ -180,6 +221,7 @@ let private detailPage (model: Model) (id: string) dispatch =
         Html.div
             [ Html.p [ link dispatch [] "← All recipes" ]
               Html.h2 recipe.title
+              Html.pre [ prop.className "whitespace-pre-wrap font-sans"; prop.text recipe.body ]
               Html.dl
                   [ Html.dt "Created"
                     Html.dd recipe.created_at
@@ -209,13 +251,15 @@ let View () =
     let model, dispatch = React.useElmish (init, update)
 
     Html.div
-        [ Html.h1 [ link dispatch [] "Plaintext Pantry" ]
-          statusLine model.Status
-          Html.hr []
-          match model.Page with
-          | RecipeList -> listPage model dispatch
-          | RecipeDetail id -> detailPage model id dispatch
-          | NotFound -> Html.p "Page not found." ]
+        [ navBar model.Page dispatch
+          Html.main
+              [ prop.className "px-4 py-3"
+                prop.children
+                    [ match model.Page with
+                      | RecipeList -> listPage model dispatch
+                      | RecipeDetail id -> detailPage model id dispatch
+                      | ShoppingList -> Html.p "Hello world"
+                      | NotFound -> Html.p "Page not found." ] ] ]
 
 let root = ReactDOM.createRoot (document.getElementById "root")
 root.render (View())

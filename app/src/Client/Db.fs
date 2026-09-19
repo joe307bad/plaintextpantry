@@ -12,7 +12,7 @@ open Shared
 open PowerSync
 
 /// Row shape of the local `recipes` table. Field names match SQLite columns.
-type Recipe = { id: string; title: string; created_at: string }
+type Recipe = { id: string; title: string; body: string; created_at: string }
 
 /// Calls to the F# server, using the coders shared with it.
 module private Api =
@@ -48,7 +48,7 @@ module private Api =
 let private nowIso () : string = jsNative
 
 let db =
-    database "plaintextpantry.sqlite" [ "recipes", [ "title", column.text; "created_at", column.text ] ]
+    database "plaintextpantry.sqlite" [ "recipes", [ "title", column.text; "body", column.text; "created_at", column.text ] ]
 
 let private toCrudOp (entry: CrudEntry) : CrudOp =
     let data =
@@ -94,7 +94,7 @@ let connect () = db.connect connector
 /// Live list of recipes; `onChange` fires with the full set on every change.
 let watchRecipes (onChange: Recipe list -> unit) =
     let query =
-        db.query<Recipe> {| sql = "SELECT id, title, created_at FROM recipes ORDER BY created_at DESC"; parameters = [||] |}
+        db.query<Recipe> {| sql = "SELECT id, title, body, created_at FROM recipes ORDER BY created_at DESC"; parameters = [||] |}
 
     query.watch().registerListener
         { new WatchedQueryListener<Recipe> with
@@ -106,10 +106,10 @@ let watchStatus (onChange: SyncStatus -> unit) =
     onChange db.currentStatus
     db.registerListener (createObj [ "statusChanged" ==> onChange ]) |> ignore
 
-let addRecipe (title: string) =
+let addRecipe (title: string) (body: string) =
     db.execute (
-        "INSERT INTO recipes (id, title, created_at) VALUES (?, ?, ?)",
-        [| string (Guid.NewGuid()); title; nowIso () |]
+        "INSERT INTO recipes (id, title, body, created_at) VALUES (?, ?, ?, ?)",
+        [| string (Guid.NewGuid()); title; body; nowIso () |]
     )
 
 let renameRecipe (id: string) (title: string) =
