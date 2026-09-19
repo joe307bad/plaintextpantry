@@ -1,0 +1,57 @@
+name: plaintextpantry
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    # Logical replication is required for PowerSync to read the WAL.
+    command: ["postgres", "-c", "wal_level=logical"]
+    environment:
+      POSTGRES_USER: ${PG_USER}
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+      POSTGRES_DB: ${PG_APP_DB}
+      PG_STORAGE_DB: ${PG_STORAGE_DB}
+    ports:
+      - "${PG_PORT}:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER} -d ${PG_APP_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  powersync:
+    image: journeyapps/powersync-service:latest
+    restart: unless-stopped
+    command: ["start", "-r", "unified"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POWERSYNC_CONFIG_PATH: /config/service.yaml
+      # Only PS_* variables can be referenced with !env inside service.yaml.
+      PS_DATA_SOURCE_URI: postgresql://${PG_USER}:${PG_PASSWORD}@postgres:5432/${PG_APP_DB}
+      PS_STORAGE_SOURCE_URI: postgresql://${PG_USER}:${PG_PASSWORD}@postgres:5432/${PG_STORAGE_DB}
+      PS_JWT_SECRET_B64: ${POWERSYNC_JWT_SECRET_B64}
+      PS_PORT: ${PS_PORT}
+    ports:
+      - "${PS_PORT}:${PS_PORT}"
+    volumes:
+      - ./powersync:/config:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:${PS_PORT}/probes/liveness').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"
+        ]
+      interval: 5s
+      timeout: 2s
+      retries: 20
+      start_period: 10s
+
+volumes:
+  pg_data:

@@ -1,0 +1,11 @@
+# yaml-language-server: $schema=https://unpkg.com/@powersync/service-sync-rules@latest/schema/sync_rules.json
+# Restart the powersync container after editing this file.
+
+config:
+  edition: 3
+
+streams:
+  # Single-user local app for now: every client gets every recipe.
+  recipes:
+    auto_subscribe: true
+    query: SELECT * FROM recipes

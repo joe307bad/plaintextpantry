@@ -1,0 +1,15 @@
+# .NET
+bin/
+obj/
+*.user
+
+# Fable / node
+node_modules/
+fable-out/
+dist/
+.vite/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
