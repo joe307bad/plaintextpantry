@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="CooklangTests.fs" />
+    <!-- github.com/cooklang/spec/blob/main/tests/canonical.yaml, vendored verbatim. -->
+    <Content Include="canonical.yaml" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Shared/Shared.fsproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="xunit.v3" Version="4.*" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="4.*" />
+    <PackageReference Include="YamlDotNet" Version="18.*" />
+  </ItemGroup>
+</Project>

@@ -160,7 +160,7 @@ let private navBar (page: Page) dispatch =
               [ navLink [] "Recipes" onRecipes
                 navLink [ "shopping-list" ] "Shopping list" (page = ShoppingList) ] ]
 
-let private newRecipeModal (recipe: RecipeForm) dispatch =
+let private newRecipeModal (recipe: RecipeForm) (known: CooklangEditor.KnownNames) dispatch =
     let field = "w-full rounded border border-gray-300 px-2 py-1"
 
     Html.div
@@ -182,12 +182,7 @@ let private newRecipeModal (recipe: RecipeForm) dispatch =
                                   prop.autoFocus true
                                   prop.value recipe.Title
                                   prop.onChange (NewTitleChanged >> dispatch) ]
-                            Html.textarea
-                                [ prop.className field
-                                  prop.rows 8
-                                  prop.placeholder "Recipe"
-                                  prop.value recipe.Body
-                                  prop.onChange (NewBodyChanged >> dispatch) ]
+                            CooklangEditor.CooklangEditor(recipe.Body, known, "Recipe", NewBodyChanged >> dispatch)
                             Html.div
                                 [ prop.className "flex justify-end gap-2"
                                   prop.children
@@ -201,7 +196,7 @@ let private newRecipeModal (recipe: RecipeForm) dispatch =
                                               prop.className "rounded bg-blue-600 px-3 py-1 text-white hover:bg-blue-700"
                                               prop.text "Save" ] ] ] ] ] ] ]
 
-let private listPage (model: Model) dispatch =
+let private listPage (model: Model) (known: CooklangEditor.KnownNames) dispatch =
     Html.div
         [ Html.button
               [ prop.type' "button"
@@ -215,10 +210,10 @@ let private listPage (model: Model) dispatch =
                   [ for r in recipes ->
                         Html.li [ linkWith "text-blue-600 underline hover:text-blue-800" dispatch [ "recipe"; r.id ] r.title ] ]
           match model.NewRecipe with
-          | Some recipe -> newRecipeModal recipe dispatch
+          | Some recipe -> newRecipeModal recipe known dispatch
           | None -> Html.none ]
 
-let private detailPage (model: Model) (id: string) dispatch =
+let private detailPage (model: Model) (id: string) (known: CooklangEditor.KnownNames) dispatch =
     match findRecipe id model.Recipes, model.Edit with
     | Some _, Some edit ->
         let field = "w-full rounded border border-gray-300 px-2 py-1"
@@ -237,12 +232,7 @@ let private detailPage (model: Model) (id: string) dispatch =
                                 prop.placeholder "Title"
                                 prop.value edit.Title
                                 prop.onChange (EditTitleChanged >> dispatch) ]
-                          Html.textarea
-                              [ prop.className field
-                                prop.rows 12
-                                prop.placeholder "Recipe"
-                                prop.value edit.Body
-                                prop.onChange (EditBodyChanged >> dispatch) ]
+                          CooklangEditor.CooklangEditor(edit.Body, known, "Recipe", EditBodyChanged >> dispatch)
                           Html.div
                               [ prop.className "flex justify-between"
                                 prop.children
@@ -264,14 +254,27 @@ let private detailPage (model: Model) (id: string) dispatch =
 let View () =
     let model, dispatch = React.useElmish (init, update)
 
+    // Names from every recipe, for the editor's completions. Recomputed only when the synced list changes.
+    let known =
+        React.useMemo (
+            (fun () ->
+                let recipes = model.Recipes |> List.map (fun r -> (Cooklang.parse r.body).Recipe)
+
+                { CooklangEditor.KnownNames.Ingredients =
+                    recipes |> List.collect Cooklang.ingredients |> List.map (fun i -> i.Name) |> List.distinct
+                  CooklangEditor.KnownNames.Cookware =
+                    recipes |> List.collect Cooklang.cookware |> List.map (fun c -> c.Name) |> List.distinct }),
+            [| box model.Recipes |]
+        )
+
     Html.div
         [ navBar model.Page dispatch
           Html.main
               [ prop.className "px-4 py-3"
                 prop.children
                     [ match model.Page with
-                      | RecipeList -> listPage model dispatch
-                      | RecipeDetail id -> detailPage model id dispatch
+                      | RecipeList -> listPage model known dispatch
+                      | RecipeDetail id -> detailPage model id known dispatch
                       | ShoppingList -> Html.p "Hello world"
                       | NotFound -> Html.p "Page not found." ] ] ]
 

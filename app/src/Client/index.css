@@ -1,3 +1,19 @@
 @import "tailwindcss";
 /* fable-out/ is gitignored, so Tailwind's auto-detection skips it; scan the F# source instead. */
-@source "./App.fs";
+@source "./*.fs";
+
+/* Cooklang editor (CodeMirror). Token classes come from CooklangEditor.fs. */
+.cm-editor { min-height: 12rem; padding: 0.25rem 0.5rem; }
+.cm-editor.cm-focused { outline: none; }
+.cm-scroller { font-family: var(--font-mono); line-height: 1.5; }
+.ck-ingredient { color: var(--color-emerald-700); font-weight: 600; }
+.ck-cookware { color: var(--color-amber-700); font-weight: 600; }
+.ck-timer { color: var(--color-sky-700); font-weight: 600; }
+.ck-quantity { color: var(--color-violet-700); }
+.ck-unit { color: var(--color-violet-500); }
+.ck-note { color: var(--color-gray-500); font-style: italic; }
+.ck-comment { color: var(--color-gray-400); font-style: italic; }
+.ck-metadata-key { color: var(--color-rose-700); }
+.ck-metadata-value { color: var(--color-gray-700); }
+.ck-delimiter { color: var(--color-gray-400); }
+.ck-section { color: var(--color-gray-900); font-weight: 700; }

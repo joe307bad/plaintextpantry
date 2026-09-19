@@ -7,6 +7,11 @@
     "build": "dotnet fable -o fable-out && vite build"
   },
   "dependencies": {
+    "@codemirror/autocomplete": "^6.20.3",
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/lint": "^6.9.7",
+    "@codemirror/state": "^6.7.5",
+    "@codemirror/view": "^6.43.12",
     "@journeyapps/wa-sqlite": "^2.0.4",
     "@powersync/web": "^2.3.1",
     "react": "^19.3.0",

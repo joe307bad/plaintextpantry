@@ -6,6 +6,8 @@
   <ItemGroup>
     <Compile Include="PowerSync.fs" />
     <Compile Include="Db.fs" />
+    <Compile Include="CodeMirror.fs" />
+    <Compile Include="CooklangEditor.fs" />
     <Compile Include="App.fs" />
   </ItemGroup>
   <ItemGroup>

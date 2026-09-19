@@ -93,8 +93,11 @@ let connect () = db.connect connector
 
 /// Live list of recipes; `onChange` fires with the full set on every change.
 let watchRecipes (onChange: Recipe list -> unit) =
-    let query =
-        db.query<Recipe> {| sql = "SELECT id, title, body, created_at FROM recipes ORDER BY created_at DESC"; parameters = [||] |}
+    // Rows synced before `body` existed have NULL there; the UI wants a string.
+    let sql =
+        "SELECT id, title, COALESCE(body, '') AS body, created_at FROM recipes ORDER BY created_at DESC"
+
+    let query = db.query<Recipe> {| sql = sql; parameters = [||] |}
 
     query.watch().registerListener
         { new WatchedQueryListener<Recipe> with
