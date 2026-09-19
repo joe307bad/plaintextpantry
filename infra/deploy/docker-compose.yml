@@ -96,6 +96,14 @@ services:
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
       # 2 GB box shared with Postgres, PowerSync and the API.
       JAVA_OPTS_KC_HEAP: "-Xms64m -Xmx384m"
+      # Theme assets are served under a build-keyed path with a 30-day
+      # max-age; an edited stylesheet would ship at an unchanged URL. Don't.
+      KC_SPI_THEME_STATIC_MAX_AGE: "-1"
+      # Content hash of ./keycloak (set by deploy.sh): a theme edit recreates
+      # the container, which is also what empties its theme cache.
+      CONFIG_HASH: ${KEYCLOAK_CONFIG_HASH}
+    volumes:
+      - ./keycloak/themes/plaintextpantry:/opt/keycloak/themes/plaintextpantry:ro
     healthcheck:
       # Management port 9000. The image has no curl/wget; bash's /dev/tcp does.
       test:

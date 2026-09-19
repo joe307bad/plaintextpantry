@@ -81,6 +81,7 @@ mapper_if_absent() { # <parent path> <name> -s ...
 
 REALM_ARGS=(
   -s "displayName=Plaintext Pantry"
+  -s loginTheme=plaintextpantry
   -s registrationAllowed=false -s resetPasswordAllowed=false -s verifyEmail=false
   -s loginWithEmailAllowed=true -s duplicateEmailsAllowed=false -s rememberMe=true
   -s sslRequired=external -s enabled=true
@@ -160,6 +161,9 @@ if [ -n "${AUTH_GOOGLE_ID:-}" ] && [ -n "${AUTH_GOOGLE_SECRET:-}" ]; then
     -s alias=google -s providerId=google -s enabled=true -s trustEmail=true -s storeToken=false
     -s "config.clientId=$AUTH_GOOGLE_ID" -s "config.clientSecret=$AUTH_GOOGLE_SECRET"
     -s 'config.defaultScope=openid email profile' -s config.syncMode=FORCE
+    # Always show Google's account chooser rather than silently reusing the
+    # last account, so "Login with Google" means picking one.
+    -s config.prompt=select_account
   )
   if kc get identity-provider/instances/google -r "$REALM" >/dev/null 2>&1; then
     kc update identity-provider/instances/google -r "$REALM" "${IDP_ARGS[@]}"

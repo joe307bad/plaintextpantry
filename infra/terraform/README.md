@@ -19,10 +19,14 @@ GoDaddy (NS) ──▶ Route53 zone ──▶ Elastic IP
 ```
 
 **Identity**: Keycloak at `auth.plaintextpantry.com` owns the users and
-brokers Google sign-in. The F# server signs users in with OIDC (session
-cookie), mints per-user PowerSync tokens, and serves an OAuth-protected MCP
-endpoint at `/mcp`. Locally, `./dev.sh` runs the same Keycloak with a seeded
-`dev@localhost` / `dev` user instead of Google.
+brokers Google sign-in ("Login with Google" goes straight to Google's account
+chooser; Keycloak's own pages are never shown). The F# server signs users in
+with OIDC (session cookie), mints per-user PowerSync tokens, and serves an
+OAuth-protected MCP endpoint at `/mcp`. The one Keycloak page people do see
+is the consent screen when connecting Claude; it uses the login theme in
+`infra/keycloak/themes/plaintextpantry`. Locally, `./dev.sh` runs the same
+Keycloak with a seeded `dev@localhost` user; the login button signs in as
+that user directly (`DEV_AUTO_LOGIN`), so `/login` is still there to work on.
 
 | File | What it provisions |
 |---|---|

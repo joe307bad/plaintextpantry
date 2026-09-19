@@ -43,7 +43,7 @@ let private upload (config: Config) : HttpHandler =
 /// (the MCP endpoint) gets a turn.
 let handler (config: Config) : HttpHandler =
     choose
-        [ GET >=> route Route.login >=> Auth.login
+        [ GET >=> route Route.login >=> Auth.login config
           GET >=> route Route.logout >=> Auth.logout config
           GET >=> route Route.me >=> Auth.me
           GET >=> route Route.syncCredentials >=> Auth.requireUser >=> syncCredentials config

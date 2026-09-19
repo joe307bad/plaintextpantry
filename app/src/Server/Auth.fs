@@ -12,7 +12,10 @@
 module Server.Auth
 
 open System
+open System.Collections.Generic
+open System.Net.Http
 open System.Security.Claims
+open System.Text.Json
 open System.Threading.Tasks
 open Microsoft.AspNetCore.Authentication
 open Microsoft.AspNetCore.Authentication.Cookies
@@ -70,6 +73,14 @@ let configure (services: IServiceCollection) (config: Config) =
             o.Events.OnTokenValidated <-
                 fun ctx ->
                     ctx.Properties.StoreTokens [ AuthenticationToken(Name = "id_token", Value = ctx.TokenEndpointResponse.IdToken) ]
+                    Task.CompletedTask
+
+            // Skip Keycloak's own login page: go straight to the Google
+            // identity provider (the realm's browser flow is also configured
+            // this way by provision.sh; this makes it explicit per request).
+            o.Events.OnRedirectToIdentityProvider <-
+                fun ctx ->
+                    ctx.ProtocolMessage.SetParameter("kc_idp_hint", "google")
                     Task.CompletedTask
 
             o.Scope.Add "email"
@@ -158,6 +169,52 @@ let requireUser: HttpHandler =
         | Some _ -> next ctx
         | None -> (setStatusCode 401 >=> json (Thoth.Json.Core.Encode.object [ "error", Thoth.Json.Core.Encode.string "Not signed in" ])) next ctx
 
+let private http = new HttpClient()
+
+/// Local dev: sign the configured Keycloak account in without a trip
+/// through Keycloak's pages. Password grant (direct access, enabled on the
+/// client only when the realm was provisioned in dev mode), then /userinfo
+/// for the claims, then the same cookie a real login would set.
+let private devAutoLogin (config: Config) (user: string) (password: string) (ctx: HttpContext) =
+    task {
+        let form (pairs: (string * string) list) =
+            new FormUrlEncodedContent(pairs |> List.map KeyValuePair)
+
+        use! tokenResp =
+            http.PostAsync(
+                $"{config.KeycloakMetadataUrl}/protocol/openid-connect/token",
+                form
+                    [ "grant_type", "password"
+                      "client_id", config.KeycloakClientId
+                      "client_secret", config.KeycloakClientSecret
+                      "username", user
+                      "password", password
+                      "scope", "openid email profile" ]
+            )
+
+        let! tokenBody = tokenResp.Content.ReadAsStringAsync()
+
+        if not tokenResp.IsSuccessStatusCode then
+            failwithf "dev auto-login: token endpoint %d: %s" (int tokenResp.StatusCode) tokenBody
+
+        let accessToken = JsonDocument.Parse(tokenBody).RootElement.GetProperty("access_token").GetString()
+
+        use req = new HttpRequestMessage(HttpMethod.Get, $"{config.KeycloakMetadataUrl}/protocol/openid-connect/userinfo")
+        req.Headers.Authorization <- Headers.AuthenticationHeaderValue("Bearer", accessToken)
+        use! infoResp = http.SendAsync req
+        let! infoBody = infoResp.Content.ReadAsStringAsync()
+        let info = JsonDocument.Parse(infoBody).RootElement
+
+        let claim name =
+            match info.TryGetProperty(name: string) with
+            | true, v -> [ Claim(name, v.GetString()) ]
+            | _ -> []
+
+        let identity = ClaimsIdentity(claim "sub" @ claim "email" @ claim "name" @ claim "preferred_username", cookieScheme)
+        do! ctx.SignInAsync(cookieScheme, ClaimsPrincipal identity)
+        ctx.User <- ClaimsPrincipal identity
+    }
+
 /// The signed-in user, or 401.
 let me: HttpHandler =
     fun next ctx ->
@@ -171,11 +228,18 @@ let private safeReturnTo (ctx: HttpContext) =
     | Some p when p.StartsWith "/" && not (p.StartsWith "//") -> p
     | _ -> "/"
 
-/// Browser navigation: sends the user through Keycloak and back to `returnTo`.
-let login: HttpHandler =
+/// Browser navigation: sends the user through Keycloak (and, from there,
+/// straight to Google) and back to `returnTo`. In local dev, signs the dev
+/// user in on the spot instead.
+let login (config: Config) : HttpHandler =
     fun _ ctx ->
         task {
-            do! ctx.ChallengeAsync(oidcScheme, AuthenticationProperties(RedirectUri = safeReturnTo ctx))
+            match config.DevAutoLogin with
+            | Some(user, password) ->
+                do! devAutoLogin config user password ctx
+                ctx.Response.Redirect(safeReturnTo ctx)
+            | None -> do! ctx.ChallengeAsync(oidcScheme, AuthenticationProperties(RedirectUri = safeReturnTo ctx))
+
             return Some ctx
         }
 

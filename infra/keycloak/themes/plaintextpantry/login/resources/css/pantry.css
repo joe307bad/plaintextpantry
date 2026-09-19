@@ -1,0 +1,224 @@
+/*
+ * Plaintext Pantry's Keycloak pages.
+ *
+ * Appended after the inherited PatternFly styles, so every rule is an override.
+ * Most sign-ins never show a Keycloak page at all (the browser flow redirects
+ * straight to Google); what this mostly dresses is the consent screen an MCP
+ * client sends people to, plus whatever error page Keycloak might show.
+ *
+ * Palette mirrors app/src/Client/index.css (brand magenta, ink), restated here
+ * because this page is served by Keycloak, not by the app's build.
+ */
+
+@font-face {
+  font-family: "Mozilla Headline";
+  src: url("../fonts/MozillaHeadline-Variable.ttf") format("truetype");
+  font-weight: 200 700;
+  font-stretch: 75% 125%;
+  font-display: swap;
+}
+
+:root {
+  --pp-brand: #ff33d2;
+  --pp-brand-dark: #d81bb0;
+  --pp-ink: #212121;
+  --pp-bg: #fafafa;
+  --pp-surface: #ffffff;
+  --pp-border: #e5e7eb;
+  --pp-muted: #6b7280;
+  --pp-radius: 12px;
+  --pp-font: "Mozilla Headline", ui-sans-serif, system-ui, sans-serif;
+}
+
+/* --- page ------------------------------------------------------------------ */
+
+body,
+body.login-pf {
+  background: var(--pp-bg);
+  font-family: var(--pp-font);
+  color: var(--pp-ink);
+}
+
+.login-pf-page {
+  padding-top: 8vh;
+}
+
+/* The realm name Keycloak puts above the card; the logo replaces it. */
+.login-pf-page-header {
+  margin-bottom: 1.5rem;
+}
+#kc-header,
+#kc-header-wrapper {
+  display: none;
+}
+.login-pf-page-header::before {
+  content: "";
+  display: block;
+  width: 220px;
+  height: 66px;
+  margin: 0 auto;
+  background: url("../img/logo.svg") center / contain no-repeat;
+}
+#kc-page-title {
+  font-family: var(--pp-font);
+  font-weight: 600;
+  font-size: 1.25rem;
+  color: var(--pp-ink);
+  margin-top: 1rem;
+}
+
+.login-pf-page .card-pf {
+  background: var(--pp-surface);
+  border: 1px solid var(--pp-border);
+  border-radius: var(--pp-radius);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
+  padding: 2rem;
+}
+
+/* --- controls -------------------------------------------------------------- */
+
+.pf-c-button.pf-m-primary,
+.kc-social-item {
+  font-family: var(--pp-font);
+  font-weight: 600;
+  background: var(--pp-ink);
+  border: 0;
+  border-radius: 999px;
+  color: #fff;
+  padding: 0.75rem 1.5rem;
+}
+.pf-c-button.pf-m-primary:hover,
+.kc-social-item:hover {
+  background: var(--pp-brand);
+  color: #fff;
+}
+.pf-c-form-control:focus,
+.pf-c-button:focus-visible,
+.kc-social-item:focus-visible {
+  outline: 3px solid var(--pp-brand);
+  outline-offset: 2px;
+  border-color: var(--pp-brand);
+}
+a {
+  color: var(--pp-brand-dark);
+}
+a:hover {
+  color: var(--pp-brand);
+}
+.instruction,
+.control-label {
+  color: var(--pp-muted);
+}
+
+/* --- consent (login-oauth-grant.ftl) ----------------------------------------- */
+
+/* That page draws its own brand; hide the header logo from above. */
+body[data-page-id$="oauth-grant"] .login-pf-page-header {
+  display: none;
+}
+body[data-page-id$="oauth-grant"] .card-pf {
+  max-width: 440px;
+  margin: 0 auto;
+}
+
+.pp-consent__logo {
+  display: block;
+  width: 180px;
+  margin: 0 auto 1.5rem;
+}
+
+.pp-consent__title {
+  font-family: var(--pp-font);
+  font-size: 1.375rem;
+  font-weight: 500;
+  line-height: 1.3;
+  text-align: center;
+  margin: 0 0 1.25rem;
+  color: var(--pp-ink);
+}
+.pp-consent__title strong {
+  font-weight: 700;
+}
+
+.pp-consent__lead {
+  margin: 0 0 0.75rem;
+  color: var(--pp-ink);
+}
+
+.pp-consent__list {
+  list-style: none;
+  margin: 0 0 1.25rem;
+  padding: 0;
+  border: 1px solid var(--pp-border);
+  border-radius: var(--pp-radius);
+}
+.pp-consent__item {
+  padding: 0.6rem 0.9rem 0.6rem 2.25rem;
+  position: relative;
+  border-top: 1px solid var(--pp-border);
+}
+.pp-consent__item:first-child {
+  border-top: 0;
+}
+/* A brand-coloured tick before each permission. */
+.pp-consent__item::before {
+  content: "";
+  position: absolute;
+  left: 0.9rem;
+  top: 0.95rem;
+  width: 0.45rem;
+  height: 0.8rem;
+  border: solid var(--pp-brand);
+  border-width: 0 3px 3px 0;
+  transform: rotate(45deg);
+}
+
+.pp-consent__caution {
+  color: var(--pp-muted);
+  font-size: 0.9375rem;
+  margin: 0 0 1.5rem;
+}
+.pp-consent__caution strong {
+  color: var(--pp-ink);
+}
+.pp-consent__links {
+  font-size: 0.875rem;
+  margin: -1rem 0 1.5rem;
+}
+.pp-consent__links a + a {
+  margin-left: 1rem;
+}
+
+.pp-consent__actions {
+  display: flex;
+  gap: 0.75rem;
+}
+.pp-btn {
+  flex: 1;
+  font-family: var(--pp-font);
+  font-size: 1rem;
+  font-weight: 600;
+  padding: 0.75rem 1.25rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+.pp-btn--primary {
+  background: var(--pp-ink);
+  color: #fff;
+}
+.pp-btn--primary:hover {
+  background: var(--pp-brand);
+}
+.pp-btn--ghost {
+  background: transparent;
+  color: var(--pp-ink);
+  border-color: var(--pp-border);
+}
+.pp-btn--ghost:hover {
+  border-color: var(--pp-ink);
+}
+.pp-btn:focus-visible {
+  outline: 3px solid var(--pp-brand);
+  outline-offset: 2px;
+}

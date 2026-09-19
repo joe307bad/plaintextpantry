@@ -26,7 +26,11 @@ type Config =
       /// Discovery/JWKS may be fetched over plain http: local dev, or prod's
       /// internal `http://keycloak:8080`. Token issuer/audience checks are
       /// unaffected by this.
-      AllowInsecureKeycloak: bool }
+      AllowInsecureKeycloak: bool
+      /// Local dev only (set by dev.sh): "user:password" of a Keycloak
+      /// account that the login button signs in directly, so the /login page
+      /// can be worked on without ever seeing Keycloak's. Never set in prod.
+      DevAutoLogin: (string * string) option }
 
 let private env name fallback =
     match Environment.GetEnvironmentVariable name with
@@ -56,4 +60,8 @@ let load () =
       KeycloakClientId = env "KEYCLOAK_CLIENT_ID" "plaintextpantry-web"
       KeycloakClientSecret = env "KEYCLOAK_CLIENT_SECRET" "plaintextpantry-local-dev-client-secret"
       McpResource = (env "MCP_RESOURCE" "http://localhost:5050/mcp").TrimEnd '/'
-      AllowInsecureKeycloak = metadataUrl.StartsWith "http://" }
+      AllowInsecureKeycloak = metadataUrl.StartsWith "http://"
+      DevAutoLogin =
+        match (env "DEV_AUTO_LOGIN" "").Split(':', 2) with
+        | [| user; password |] -> Some(user, password)
+        | _ -> None }

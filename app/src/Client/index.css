@@ -2,6 +2,22 @@
 /* fable-out/ is gitignored, so Tailwind's auto-detection skips it; scan the F# source instead. */
 @source "./*.fs";
 
+/* Brand: Mozilla Headline (OFL, public/brand/fonts) for headings, nav and the
+   login page; the logo's magenta as `brand`. */
+@font-face {
+  font-family: "Mozilla Headline";
+  src: url("/brand/fonts/MozillaHeadline-Variable.ttf") format("truetype");
+  font-weight: 200 700;
+  font-stretch: 75% 125%;
+  font-display: swap;
+}
+
+@theme {
+  --font-headline: "Mozilla Headline", ui-sans-serif, system-ui, sans-serif;
+  --color-brand: #ff33d2;
+  --color-ink: #212121;
+}
+
 /* Cooklang editor (CodeMirror). Token classes come from CooklangEditor.fs. */
 .cm-editor { min-height: 12rem; padding: 0.25rem 0.5rem; }
 .cm-editor.cm-focused { outline: none; }

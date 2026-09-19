@@ -74,6 +74,9 @@ services:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
       JAVA_OPTS_KC_HEAP: "-Xms64m -Xmx384m"
+    volumes:
+      # Login theme (dev mode doesn't cache themes, so edits show on reload).
+      - ../keycloak/themes/plaintextpantry:/opt/keycloak/themes/plaintextpantry:ro
     ports:
       - "${KC_PORT}:${KC_PORT}"
     healthcheck:

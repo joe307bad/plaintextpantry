@@ -135,8 +135,8 @@ let signOut () =
         Browser.Dom.window.location.href <- Route.logout
     }
 
-let signIn () =
-    Browser.Dom.window.location.href <- Route.login + "?returnTo=" + JS.encodeURIComponent Browser.Dom.window.location.pathname
+let signIn (returnTo: string) =
+    Browser.Dom.window.location.href <- Route.login + "?returnTo=" + JS.encodeURIComponent returnTo
 
 /// Live list of recipes; `onChange` fires with the full set on every change.
 let watchRecipes (onChange: Recipe list -> unit) =

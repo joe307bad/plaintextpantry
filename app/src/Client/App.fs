@@ -23,6 +23,10 @@ module Router =
     let navigate segments =
         window.history.pushState (null, "", format segments)
 
+    /// Like navigate, but doesn't leave a history entry (auth redirects).
+    let replace segments =
+        window.history.replaceState (null, "", format segments)
+
     let onUrlChanged (handler: string list -> unit) =
         window.addEventListener ("popstate", fun _ -> handler (currentUrl ()))
 
@@ -30,6 +34,7 @@ type Page =
     | RecipeList
     | RecipeDetail of id: string
     | ShoppingList
+    | Login
     | NotFound
 
 /// Editable recipe fields, used by both the "New Recipe" modal and the detail page.
@@ -44,6 +49,8 @@ type Session =
 type Model =
     { Page: Page
       Session: Session
+      /// Where to land after signing in: the page that hit the 401.
+      ReturnTo: string list
       Recipes: Recipe list
       ShoppingItems: ShoppingItem list
       /// `Some` while the "New Recipe" modal is open.
@@ -82,6 +89,7 @@ let private parseUrl (segments: string list) =
     | [] -> RecipeList
     | [ "recipe"; id ] -> RecipeDetail id
     | [ "shopping-list" ] -> ShoppingList
+    | [ "login" ] -> Login
     | _ -> NotFound
 
 let private fireAndForget (work: JS.Promise<'a>) =
@@ -92,6 +100,7 @@ let private fireAndForget (work: JS.Promise<'a>) =
 let init () =
     { Page = parseUrl (Router.currentUrl ())
       Session = Checking
+      ReturnTo = []
       Recipes = []
       ShoppingItems = []
       NewRecipe = None
@@ -117,9 +126,22 @@ let private formOf (recipe: Recipe) = { Title = recipe.title; Body = recipe.body
 
 let update msg model =
     match msg with
-    | SessionChecked(Some user) -> { model with Session = SignedIn user }, startSync ()
-    | SessionChecked None -> { model with Session = SignedOut }, Cmd.none
-    | SignIn -> model, Cmd.ofEffect (fun _ -> Db.signIn ())
+    | SessionChecked(Some user) ->
+        // A signed-in user has no business on /login.
+        let page =
+            if model.Page = Login then
+                Router.replace []
+                RecipeList
+            else
+                model.Page
+
+        { model with Session = SignedIn user; Page = page }, startSync ()
+    | SessionChecked None ->
+        let returnTo = if model.Page = Login then [] else Router.currentUrl ()
+        if model.Page <> Login then Router.replace [ "login" ]
+
+        { model with Session = SignedOut; Page = Login; ReturnTo = returnTo }, Cmd.none
+    | SignIn -> model, Cmd.ofEffect (fun _ -> Db.signIn (Router.format model.ReturnTo))
     | SignOut -> model, fireAndForget (Db.signOut ())
     | UrlChanged segments ->
         let page = parseUrl segments
@@ -207,9 +229,18 @@ let private navBar (page: Page) (user: Shared.User) dispatch =
         | _ -> false
 
     Html.nav
-        [ prop.className "flex items-center gap-6 border-b border-gray-200 px-4 py-3"
+        [ prop.className "flex items-center gap-6 border-b border-gray-200 px-4 py-3 font-headline"
           prop.children
-              [ navLink [] "Recipes" onRecipes
+              [ // Just the door, no wordmark, at the top left.
+                Html.a
+                    [ prop.href "/"
+                      prop.ariaLabel "Plaintext Pantry"
+                      prop.onClick (fun e ->
+                          e.preventDefault ()
+                          Router.navigate []
+                          dispatch (UrlChanged []))
+                      prop.children [ Html.img [ prop.src "/brand/icon.png"; prop.alt ""; prop.className "h-7 w-7" ] ] ]
+                navLink [] "Recipes" onRecipes
                 navLink [ "shopping-list" ] "Shopping list" (page = ShoppingList)
                 Html.span [ prop.className "ml-auto text-sm text-gray-500"; prop.text user.Email ]
                 Html.button
@@ -219,13 +250,16 @@ let private navBar (page: Page) (user: Shared.User) dispatch =
 
 let private loginPage dispatch =
     Html.main
-        [ prop.className "flex min-h-screen flex-col items-center justify-center gap-4 px-4"
+        [ prop.className "flex min-h-screen flex-col items-center justify-center gap-8 px-4 font-headline"
           prop.children
-              [ Html.h1 [ prop.className "text-2xl font-semibold"; prop.text "Plaintext Pantry" ]
-                Html.p [ prop.className "text-gray-500"; prop.text "Recipes in plain text, on every device." ]
+              [ Html.img [ prop.src "/brand/logo.svg"; prop.alt "Plaintext Pantry"; prop.className "w-72 max-w-full" ]
+                Html.p
+                    [ prop.className "max-w-sm text-center text-lg text-gray-600"
+                      prop.text "Recipes in plain text. Yours on every device, and easy to share with an assistant." ]
                 Html.button
-                    [ prop.className "rounded bg-gray-900 px-4 py-2 text-white hover:bg-gray-700"
-                      prop.text "Sign in"
+                    [ prop.className
+                          "rounded-full bg-ink px-6 py-3 text-base font-semibold text-white transition hover:bg-brand"
+                      prop.text "Login with Google"
                       prop.onClick (fun _ -> dispatch SignIn) ] ] ]
 
 let private newRecipeModal (recipe: RecipeForm) (known: CooklangEditor.KnownNames) dispatch =
@@ -426,6 +460,7 @@ let View () =
     match model.Session with
     | Checking -> Html.none
     | SignedOut -> loginPage dispatch
+    | SignedIn _ when model.Page = Login -> Html.none
     | SignedIn user ->
         Html.div
             [ navBar model.Page user dispatch
@@ -436,6 +471,7 @@ let View () =
                           | RecipeList -> listPage model known dispatch
                           | RecipeDetail id -> detailPage model id known dispatch
                           | ShoppingList -> shoppingListPage model dispatch
+                          | Login -> Html.none
                           | NotFound -> Html.p "Page not found." ] ] ]
 
 let root = ReactDOM.createRoot (document.getElementById "root")

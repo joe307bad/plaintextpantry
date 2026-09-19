@@ -19,6 +19,9 @@ esac
 # Same values the containers use, exported for the F# server and the scripts.
 set -a; source infra/docker/.env; set +a
 export KEYCLOAK_ISSUER="$KEYCLOAK_PUBLIC_URL/realms/$KEYCLOAK_REALM"
+# "Login with Google" on /login signs in as the seeded dev user directly,
+# without Keycloak's pages. Unset to exercise the real Keycloak flow.
+export DEV_AUTO_LOGIN="dev@localhost:dev"
 
 echo "==> infra"
 # Postgres first: the schema/side databases must exist before Keycloak and
@@ -43,7 +46,7 @@ echo
 echo "  app:       http://localhost:5173"
 echo "  api:       http://localhost:5050"
 echo "  powersync: http://localhost:8080"
-echo "  keycloak:  $KEYCLOAK_PUBLIC_URL  (dev@localhost / dev)"
+echo "  keycloak:  $KEYCLOAK_PUBLIC_URL  (login button signs in as dev@localhost)"
 echo "  mcp:       $MCP_RESOURCE"
 echo
 wait
