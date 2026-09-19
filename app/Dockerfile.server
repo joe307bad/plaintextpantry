@@ -1,0 +1,21 @@
+# F# API server. Compiles on the build host's native architecture and only
+# copies the published output into the target-arch runtime image, so building
+# linux/arm64 from an x64 CI runner never runs dotnet under emulation.
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+ARG TARGETARCH
+WORKDIR /src
+COPY global.json ./
+COPY src/Shared/Shared.fsproj src/Shared/
+COPY src/Server/Server.fsproj src/Server/
+RUN dotnet restore src/Server -a $TARGETARCH
+COPY src/Shared src/Shared
+COPY src/Server src/Server
+RUN dotnet publish src/Server -c Release -a $TARGETARCH --no-restore -o /out
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0
+WORKDIR /app
+COPY --from=build /out .
+ENV SERVER_URL=http://0.0.0.0:5050
+EXPOSE 5050
+USER app
+ENTRYPOINT ["dotnet", "Server.dll"]

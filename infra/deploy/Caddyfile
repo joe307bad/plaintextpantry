@@ -1,0 +1,38 @@
+# Production reverse proxy. DOMAIN comes from the environment (compose sets it
+# from .env). Caddy issues and renews Let's Encrypt certs itself, which only
+# works once the domain resolves to this box's elastic IP.
+#
+#   /health       -> Caddy itself (deploy + CI health checks)
+#   /api/*        -> F# server (prefix kept; the server routes on /api/...)
+#   /powersync/*  -> PowerSync service (prefix stripped)
+#   /*            -> static client, SPA fallback to index.html
+
+{$DOMAIN} {
+    encode zstd gzip
+
+    handle /health {
+        respond "OK" 200
+    }
+
+    handle /api/* {
+        reverse_proxy server:5050
+    }
+
+    handle /powersync/* {
+        uri strip_prefix /powersync
+        reverse_proxy powersync:8080 {
+            # The sync stream is a long-lived streaming response; never buffer it.
+            flush_interval -1
+        }
+    }
+
+    handle {
+        root * /srv
+        try_files {path} /index.html
+        file_server
+    }
+}
+
+www.{$DOMAIN} {
+    redir https://{$DOMAIN}{uri} permanent
+}

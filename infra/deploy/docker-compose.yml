@@ -1,0 +1,104 @@
+# Production stack for the EC2 box. Deployed by deploy.sh, which writes .env
+# from SSM Parameter Store and the values CI passes in.
+#
+# ./powersync and ./postgres are copied from infra/docker by the workflow when
+# it assembles the bundle, so sync rules and the schema init script have one
+# source of truth. Only Caddy is reachable from outside.
+name: plaintextpantry
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    # wal_level=logical is required for PowerSync replication.
+    # max_slot_wal_keep_size caps WAL retained per replication slot: a PowerSync
+    # redeploy can orphan its old slot, and an uncapped dead slot pins WAL until
+    # the disk fills (topspin hit 33GB this way).
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_slot_wal_keep_size=2GB
+    environment:
+      POSTGRES_USER: ${PG_USER}
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+      POSTGRES_DB: ${PG_APP_DB}
+      PG_STORAGE_DB: ${PG_STORAGE_DB}
+    volumes:
+      - /data/postgres:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER} -d ${PG_APP_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  powersync:
+    image: journeyapps/powersync-service:latest
+    restart: unless-stopped
+    command: ["start", "-r", "unified"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POWERSYNC_CONFIG_PATH: /config/service.yaml
+      PS_DATA_SOURCE_URI: postgresql://${PG_USER}:${PG_PASSWORD}@postgres:5432/${PG_APP_DB}
+      PS_STORAGE_SOURCE_URI: postgresql://${PG_USER}:${PG_PASSWORD}@postgres:5432/${PG_STORAGE_DB}
+      PS_JWT_SECRET_B64: ${POWERSYNC_JWT_SECRET_B64}
+      PS_PORT: "8080"
+      # Content hash of ./powersync (set by deploy.sh). Bind-mounted files
+      # aren't part of what compose diffs, so this is what makes an edited
+      # sync-config.yaml recreate the container.
+      CONFIG_HASH: ${POWERSYNC_CONFIG_HASH}
+    volumes:
+      - ./powersync:/config:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:8080/probes/liveness').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 2s
+      retries: 20
+      start_period: 15s
+
+  server:
+    image: ${ECR_REGISTRY}/plaintextpantry/server:${IMAGE_TAG}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SERVER_URL: http://0.0.0.0:5050
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      PG_USER: ${PG_USER}
+      PG_PASSWORD: ${PG_PASSWORD}
+      PG_APP_DB: ${PG_APP_DB}
+      # Public URL the browser uses; Caddy strips the prefix.
+      POWERSYNC_URL: https://${DOMAIN}/powersync
+      POWERSYNC_JWT_SECRET: ${POWERSYNC_JWT_SECRET}
+
+  web:
+    image: ${ECR_REGISTRY}/plaintextpantry/web:${IMAGE_TAG}
+    restart: unless-stopped
+    depends_on:
+      - server
+      - powersync
+    environment:
+      DOMAIN: ${DOMAIN}
+      CONFIG_HASH: ${CADDY_CONFIG_HASH} # same idea, for the Caddyfile
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Let's Encrypt certs and account keys; on the data volume so an
+      # instance replacement doesn't hit LE rate limits re-issuing.
+      - /data/caddy/data:/data
+      - /data/caddy/config:/config

@@ -1,0 +1,235 @@
+name: Deploy
+
+# Every merge to main converges AWS on the repo, in three stages that each
+# detect their own changes:
+#   infra  - terraform plan; apply only if the plan has changes
+#   build  - images tagged by the git tree hash of app/; skipped if the tag
+#            already exists in ECR (i.e. app/ didn't change)
+#   deploy - ship the compose bundle over SSM; `docker compose up -d` only
+#            recreates containers whose image or config differ
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write # OIDC -> AWS
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ROLE_ARN: arn:aws:iam::372400261891:role/plaintextpantry-github-deploy
+  TF_IN_AUTOMATION: "1"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet test --project app/tests/Shared.Tests
+
+  infra:
+    runs-on: ubuntu-latest
+    outputs:
+      instance_id: ${{ steps.out.outputs.instance_id }}
+      ecr_registry: ${{ steps.out.outputs.ecr_registry }}
+      deploy_bucket: ${{ steps.out.outputs.deploy_bucket }}
+      domain: ${{ steps.out.outputs.domain }}
+      ssm_prefix: ${{ steps.out.outputs.ssm_prefix }}
+      name_servers: ${{ steps.out.outputs.name_servers }}
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - run: terraform fmt -check -recursive
+      - run: terraform init -input=false
+      - run: terraform validate
+
+      # -detailed-exitcode: 0 = no changes, 2 = changes, 1 = error.
+      - name: Plan
+        id: plan
+        run: |
+          set +e
+          terraform plan -input=false -out=tfplan -detailed-exitcode
+          code=$?
+          set -e
+          case $code in
+            0) echo "changed=false" >> "$GITHUB_OUTPUT" ;;
+            2) echo "changed=true"  >> "$GITHUB_OUTPUT" ;;
+            *) exit $code ;;
+          esac
+
+      - name: Apply
+        if: steps.plan.outputs.changed == 'true'
+        run: terraform apply -input=false tfplan
+
+      - name: Outputs
+        id: out
+        run: |
+          for k in instance_id ecr_registry deploy_bucket domain ssm_prefix; do
+            echo "$k=$(terraform output -raw $k)" >> "$GITHUB_OUTPUT"
+          done
+          echo "name_servers=$(terraform output -json name_servers | jq -r 'join(" ")')" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: [test, infra]
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Content address: identical app/ source -> identical tag.
+      - name: Image tag
+        id: tag
+        run: echo "tag=$(git rev-parse HEAD:app)" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Already built?
+        id: exists
+        run: |
+          missing=""
+          for repo in server web; do
+            if aws ecr describe-images --repository-name plaintextpantry/$repo \
+                 --image-ids imageTag=${{ steps.tag.outputs.tag }} >/dev/null 2>&1; then
+              echo "plaintextpantry/$repo:${{ steps.tag.outputs.tag }} exists"
+            else
+              missing="$missing $repo"
+            fi
+          done
+          echo "missing=${missing# }" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        if: steps.exists.outputs.missing != ''
+      - uses: docker/setup-qemu-action@v3
+        if: steps.exists.outputs.missing != ''
+      - uses: docker/setup-buildx-action@v3
+        if: steps.exists.outputs.missing != ''
+
+      - name: Build and push
+        if: steps.exists.outputs.missing != ''
+        env:
+          REGISTRY: ${{ needs.infra.outputs.ecr_registry }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          for repo in ${{ steps.exists.outputs.missing }}; do
+            docker buildx build \
+              --platform linux/arm64 \
+              --file app/Dockerfile.$repo \
+              --tag $REGISTRY/plaintextpantry/$repo:$TAG \
+              --cache-from type=gha,scope=$repo \
+              --cache-to type=gha,scope=$repo,mode=max \
+              --push \
+              app
+          done
+
+  deploy:
+    needs: [infra, build]
+    runs-on: ubuntu-latest
+    env:
+      INSTANCE_ID: ${{ needs.infra.outputs.instance_id }}
+      BUCKET: ${{ needs.infra.outputs.deploy_bucket }}
+      IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # infra/deploy plus the config it shares with local dev.
+      - name: Upload bundle
+        run: |
+          stage=$(mktemp -d)
+          cp -r infra/deploy/. "$stage/"
+          cp -r infra/docker/powersync "$stage/powersync"
+          cp -r infra/docker/postgres "$stage/postgres"
+          tar -C "$stage" -czf bundle.tgz .
+          aws s3 cp bundle.tgz "s3://$BUCKET/bundles/${{ github.sha }}.tgz"
+
+      # A freshly created instance takes a minute or two to register with SSM.
+      - name: Wait for SSM agent
+        run: |
+          for i in $(seq 1 30); do
+            status=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
+              --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || true)
+            [ "$status" = "Online" ] && exit 0
+            echo "ssm agent: ${status:-not registered} ($i/30)"
+            sleep 10
+          done
+          echo "instance never came online in SSM"; exit 1
+
+      - name: Deploy over SSM
+        run: |
+          cmd=$(cat <<SH
+          set -euo pipefail
+          # user-data may still be running on a brand-new box
+          for i in \$(seq 1 60); do grep -q 'bootstrap done' /var/log/user-data.log 2>/dev/null && break; sleep 5; done
+          grep -q 'bootstrap done' /var/log/user-data.log
+          rm -rf /opt/plaintextpantry.new && mkdir -p /opt/plaintextpantry.new
+          aws s3 cp s3://$BUCKET/bundles/${{ github.sha }}.tgz /tmp/bundle.tgz --region $AWS_REGION --quiet
+          tar -C /opt/plaintextpantry.new -xzf /tmp/bundle.tgz && rm /tmp/bundle.tgz
+          rm -rf /opt/plaintextpantry.old
+          [ -d /opt/plaintextpantry ] && mv /opt/plaintextpantry /opt/plaintextpantry.old || true
+          mv /opt/plaintextpantry.new /opt/plaintextpantry
+          cd /opt/plaintextpantry
+          IMAGE_TAG=$IMAGE_TAG ECR_REGISTRY=${{ needs.infra.outputs.ecr_registry }} \
+          DOMAIN=${{ needs.infra.outputs.domain }} AWS_REGION=$AWS_REGION \
+          SSM_PREFIX=${{ needs.infra.outputs.ssm_prefix }} \
+          ./deploy.sh
+          SH
+          )
+          id=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "deploy ${{ github.sha }}" \
+            --timeout-seconds 900 \
+            --parameters "$(jq -n --arg c "$cmd" '{commands: [$c], executionTimeout: ["900"]}')" \
+            --query Command.CommandId --output text)
+          echo "command $id"
+
+          while :; do
+            status=$(aws ssm get-command-invocation --command-id "$id" --instance-id "$INSTANCE_ID" \
+              --query Status --output text 2>/dev/null || echo Pending)
+            case $status in
+              Pending|InProgress|Delayed) sleep 5 ;;
+              *) break ;;
+            esac
+          done
+
+          aws ssm get-command-invocation --command-id "$id" --instance-id "$INSTANCE_ID" \
+            --query '[StandardOutputContent, StandardErrorContent]' --output text
+          [ "$status" = "Success" ] || { echo "deploy $status"; exit 1; }
+
+      - name: Public health check
+        run: |
+          domain=${{ needs.infra.outputs.domain }}
+          if curl -sf --max-time 15 "https://$domain/health" >/dev/null; then
+            echo "https://$domain is up"
+          else
+            echo "::warning::https://$domain not reachable yet. If DNS hasn't been delegated, set GoDaddy nameservers to: ${{ needs.infra.outputs.name_servers }}"
+          fi

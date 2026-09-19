@@ -16,7 +16,7 @@ let main args =
     builder.Services.AddGiraffe() |> ignore
 
     let app = builder.Build()
-    app.Urls.Add "http://localhost:5050"
+    app.Urls.Add config.ListenUrl
     app.UseGiraffeErrorHandler(fun ex logger ->
         logger.LogError(ex, "Unhandled request error")
         ServerErrors.INTERNAL_ERROR ex.Message)

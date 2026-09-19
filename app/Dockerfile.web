@@ -1,0 +1,19 @@
+# Static client: Fable (needs the .NET SDK) + Vite, served by Caddy. The
+# Caddyfile is not baked in - infra/deploy mounts it, so routing changes don't
+# force a rebuild of this image.
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY global.json ./
+COPY .config .config
+RUN dotnet tool restore
+COPY src/Client/package.json src/Client/package-lock.json src/Client/
+RUN cd src/Client && npm ci
+COPY src/Shared src/Shared
+COPY src/Client src/Client
+RUN cd src/Client && npm run build
+
+FROM caddy:2-alpine
+COPY --from=build /src/src/Client/dist /srv
