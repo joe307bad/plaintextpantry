@@ -2,8 +2,8 @@
 /* fable-out/ is gitignored, so Tailwind's auto-detection skips it; scan the F# source instead. */
 @source "./*.fs";
 
-/* Brand: Mozilla Headline (OFL, public/brand/fonts) for headings, nav and the
-   login page; the logo's magenta as `brand`. */
+/* Brand: Mozilla Headline (OFL, public/brand/fonts) is reserved for the
+   wordmark; everything else is Helvetica. The logo's magenta is `brand`. */
 @font-face {
   font-family: "Mozilla Headline";
   src: url("/brand/fonts/MozillaHeadline-Variable.ttf") format("truetype");
@@ -13,10 +13,53 @@
 }
 
 @theme {
+  --font-sans: Helvetica, "Helvetica Neue", Arial, sans-serif;
   --font-headline: "Mozilla Headline", ui-sans-serif, system-ui, sans-serif;
   --color-brand: #ff33d2;
   --color-ink: #212121;
 }
+
+@layer base {
+  /* Buttons are sharp-cornered rectangles and dip slightly when pressed. */
+  button,
+  [type="button"],
+  [type="submit"] {
+    border-radius: 0;
+    cursor: pointer;
+    /* No double-tap-to-zoom wait on touch screens: taps fire immediately. */
+    touch-action: manipulation;
+    transition-property: transform, box-shadow, background-color, color, border-color;
+    transition-duration: 100ms;
+  }
+  a,
+  label,
+  input[type="checkbox"] {
+    touch-action: manipulation;
+  }
+  button:disabled,
+  [type="button"]:disabled,
+  [type="submit"]:disabled {
+    cursor: default;
+  }
+  button:active:not(:disabled),
+  [type="button"]:active:not(:disabled),
+  [type="submit"]:active:not(:disabled) {
+    transform: scale(0.96);
+  }
+}
+
+/* Mobile menu: the sheet slides up and the backdrop fades, fast enough to
+   read as immediate but with enough motion to show where it came from. */
+@keyframes sheet-in {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.sheet-in { animation: sheet-in 150ms ease-out; }
+.fade-in { animation: fade-in 150ms ease-out; }
 
 /* Cooklang editor (CodeMirror). Token classes come from CooklangEditor.fs. */
 .cm-editor { min-height: 12rem; padding: 0.25rem 0.5rem; }

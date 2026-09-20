@@ -155,7 +155,7 @@ let watchRecipes (onChange: Recipe list -> unit) =
 /// Live shopping list: unchecked items first, oldest first within each group.
 let watchShoppingItems (onChange: ShoppingItem list -> unit) =
     let sql =
-        "SELECT id, name, quantity, unit, done, created_at FROM shopping_items ORDER BY done, created_at"
+        "SELECT id, name, quantity, unit, done, created_at FROM shopping_items ORDER BY done, created_at, id"
 
     let query = db.query<ShoppingItem> {| sql = sql; parameters = [||] |}
 
@@ -169,10 +169,18 @@ let watchStatus (onChange: SyncStatus -> unit) =
     onChange db.currentStatus
     db.registerListener (createObj [ "statusChanged" ==> onChange ]) |> ignore
 
-let addRecipe (title: string) (body: string) =
+/// The row a new recipe becomes. Built by the caller so the UI can show it
+/// before the insert lands.
+let newRecipe (title: string) (body: string) : Recipe =
+    { id = string (Guid.NewGuid())
+      title = title
+      body = body
+      created_at = nowIso () }
+
+let addRecipe (recipe: Recipe) =
     db.execute (
         "INSERT INTO recipes (id, title, body, created_at) VALUES (?, ?, ?, ?)",
-        [| string (Guid.NewGuid()); title; body; nowIso () |]
+        [| recipe.id; recipe.title; recipe.body; recipe.created_at |]
     )
 
 let updateRecipe (id: string) (title: string) (body: string) =
@@ -189,37 +197,62 @@ let private quantityText (quantity: Quantity option) =
     | Some(Quantity.Text t) -> t
     | None -> ""
 
+/// What adding ingredients does to the list: rows whose quantity was topped
+/// up, and rows that are new. The caller shows the resulting list at once and
+/// hands the plan to `addToShoppingList` to persist.
+type ShoppingPlan = { Updated: ShoppingItem list; Inserted: ShoppingItem list }
+
 /// One row per ingredient. An unchecked row with the same name and unit is
 /// topped up instead when both quantities are numbers, so adding two recipes
-/// that need flour gives one line, not two.
-let addToShoppingList (ingredients: Cooklang.Ingredient list) =
-    promise {
-        for i in ingredients do
-            let unit = defaultArg i.Unit ""
+/// that need flour gives one line, not two. Pure: works off the list the UI
+/// already holds (a mirror of the table), so nothing is read from SQLite.
+let planShoppingAdd (items: ShoppingItem list) (ingredients: Cooklang.Ingredient list) =
+    let step (items: ShoppingItem list, updated: Set<string>, inserted: Set<string>) (i: Cooklang.Ingredient) =
+        let unit = defaultArg i.Unit ""
 
-            let! existing =
-                db.getOptional<ShoppingItem> (
-                    "SELECT id, name, quantity, unit, done, created_at FROM shopping_items WHERE lower(name) = lower(?) AND unit = ? AND done = 0",
-                    [| i.Name; unit |]
+        let existing =
+            items
+            |> List.tryFind (fun r ->
+                r.name.ToLowerInvariant() = i.Name.ToLowerInvariant() && r.unit = unit && r.``done`` = 0)
+
+        match existing, i.Quantity with
+        | Some row, Some(Quantity.Number n) when fst (Double.TryParse row.quantity) ->
+            let topped = { row with quantity = string (float row.quantity + n) }
+            items |> List.map (fun r -> if r.id = row.id then topped else r), Set.add row.id updated, inserted
+        | _ ->
+            let row =
+                { id = string (Guid.NewGuid())
+                  name = i.Name
+                  quantity = quantityText i.Quantity
+                  unit = unit
+                  ``done`` = 0
+                  created_at = nowIso () }
+
+            items @ [ row ], updated, Set.add row.id inserted
+
+    let items, updated, inserted = ingredients |> List.fold step (items, Set.empty, Set.empty)
+    // A row inserted then topped up by a later ingredient is still one insert.
+    let updated = Set.difference updated inserted
+    let items = items |> List.sortBy (fun i -> i.``done``, i.created_at, i.id)
+
+    items,
+    { Updated = items |> List.filter (fun i -> updated.Contains i.id)
+      Inserted = items |> List.filter (fun i -> inserted.Contains i.id) }
+
+let addToShoppingList (plan: ShoppingPlan) =
+    promise {
+        for row in plan.Updated do
+            let! _ = db.execute ("UPDATE shopping_items SET quantity = ? WHERE id = ?", [| row.quantity; row.id |])
+            ()
+
+        for row in plan.Inserted do
+            let! _ =
+                db.execute (
+                    "INSERT INTO shopping_items (id, name, quantity, unit, done, created_at) VALUES (?, ?, ?, ?, 0, ?)",
+                    [| row.id; row.name; row.quantity; row.unit; row.created_at |]
                 )
 
-            match existing, i.Quantity with
-            | Some row, Some(Quantity.Number n) when fst (Double.TryParse row.quantity) ->
-                let! _ =
-                    db.execute (
-                        "UPDATE shopping_items SET quantity = ? WHERE id = ?",
-                        [| string (float row.quantity + n); row.id |]
-                    )
-
-                ()
-            | _ ->
-                let! _ =
-                    db.execute (
-                        "INSERT INTO shopping_items (id, name, quantity, unit, done, created_at) VALUES (?, ?, ?, ?, 0, ?)",
-                        [| string (Guid.NewGuid()); i.Name; quantityText i.Quantity; unit; nowIso () |]
-                    )
-
-                ()
+            ()
     }
 
 let setShoppingItemDone (id: string) (isDone: bool) =

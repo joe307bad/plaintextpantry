@@ -27,7 +27,9 @@
   --pp-border: #e5e7eb;
   --pp-muted: #6b7280;
   --pp-radius: 12px;
-  --pp-font: "Mozilla Headline", ui-sans-serif, system-ui, sans-serif;
+  /* Mozilla Headline is reserved for the wordmark (baked into logo.svg);
+     everything on these pages is Helvetica. */
+  --pp-font: Helvetica, "Helvetica Neue", Arial, sans-serif;
 }
 
 /* --- page ------------------------------------------------------------------ */
@@ -81,16 +83,24 @@ body.login-pf {
 .kc-social-item {
   font-family: var(--pp-font);
   font-weight: 600;
-  background: var(--pp-ink);
+  background: var(--pp-brand);
   border: 0;
-  border-radius: 999px;
+  border-radius: 0;
   color: #fff;
   padding: 0.75rem 1.5rem;
+  cursor: pointer;
+  transition: transform 100ms, box-shadow 100ms;
 }
 .pf-c-button.pf-m-primary:hover,
 .kc-social-item:hover {
   background: var(--pp-brand);
   color: #fff;
+  box-shadow: 0 4px 6px -1px rgb(255 51 210 / 0.3), 0 2px 4px -2px rgb(255 51 210 / 0.3);
+}
+.pf-c-button:active,
+.kc-social-item:active,
+.pp-btn:active {
+  transform: scale(0.96);
 }
 .pf-c-form-control:focus,
 .pf-c-button:focus-visible,
@@ -199,16 +209,17 @@ body[data-page-id$="oauth-grant"] .card-pf {
   font-size: 1rem;
   font-weight: 600;
   padding: 0.75rem 1.25rem;
-  border-radius: 999px;
+  border-radius: 0;
   border: 1px solid transparent;
   cursor: pointer;
+  transition: transform 100ms, box-shadow 100ms;
 }
 .pp-btn--primary {
-  background: var(--pp-ink);
+  background: var(--pp-brand);
   color: #fff;
 }
 .pp-btn--primary:hover {
-  background: var(--pp-brand);
+  box-shadow: 0 4px 6px -1px rgb(255 51 210 / 0.3), 0 2px 4px -2px rgb(255 51 210 / 0.3);
 }
 .pp-btn--ghost {
   background: transparent;
