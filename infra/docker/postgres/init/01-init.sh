@@ -20,10 +20,20 @@ CREATE TABLE recipes (
     created_at  timestamptz NOT NULL DEFAULT now()
 );
 
+-- Just a name for now; the app adds to the user's newest list and makes
+-- one when they have none.
+CREATE TABLE shopping_lists (
+    id          uuid PRIMARY KEY,
+    user_id     text NOT NULL,
+    name        text NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+
 -- One row per ingredient line; `quantity` is text so "some" / "few" survive.
 CREATE TABLE shopping_items (
     id          uuid PRIMARY KEY,
     user_id     text NOT NULL,
+    list_id     uuid NOT NULL,
     name        text NOT NULL,
     quantity    text NOT NULL DEFAULT '',
     unit        text NOT NULL DEFAULT '',
@@ -32,7 +42,9 @@ CREATE TABLE shopping_items (
 );
 
 CREATE INDEX recipes_user_id ON recipes (user_id);
+CREATE INDEX shopping_lists_user_id ON shopping_lists (user_id);
 CREATE INDEX shopping_items_user_id ON shopping_items (user_id);
+CREATE INDEX shopping_items_list_id ON shopping_items (list_id);
 
 CREATE PUBLICATION powersync FOR ALL TABLES;
 SQL

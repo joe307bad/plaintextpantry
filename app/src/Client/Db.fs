@@ -14,9 +14,13 @@ open PowerSync
 /// Row shape of the local `recipes` table. Field names match SQLite columns.
 type Recipe = { id: string; title: string; body: string; created_at: string }
 
+/// Row shape of the local `shopping_lists` table. Only a name for now.
+type ShoppingList = { id: string; name: string; created_at: string }
+
 /// Row shape of the local `shopping_items` table. `quantity` is text so "some" survives; `done` is 0/1.
 type ShoppingItem =
     { id: string
+      list_id: string
       name: string
       quantity: string
       unit: string
@@ -76,8 +80,10 @@ let db =
     database
         "plaintextpantry.sqlite"
         [ "recipes", [ "title", column.text; "body", column.text; "created_at", column.text ]
+          "shopping_lists", [ "name", column.text; "created_at", column.text ]
           "shopping_items",
-          [ "name", column.text
+          [ "list_id", column.text
+            "name", column.text
             "quantity", column.text
             "unit", column.text
             "done", column.integer
@@ -152,10 +158,22 @@ let watchRecipes (onChange: Recipe list -> unit) =
             member _.onError(err) = JS.console.error ("watch recipes", err) }
     |> ignore
 
-/// Live shopping list: unchecked items first, oldest first within each group.
+/// Live shopping lists, newest first. The head is the one adding goes into.
+let watchShoppingLists (onChange: ShoppingList list -> unit) =
+    let sql = "SELECT id, name, created_at FROM shopping_lists ORDER BY created_at DESC, id"
+    let query = db.query<ShoppingList> {| sql = sql; parameters = [||] |}
+
+    query.watch().registerListener
+        { new WatchedQueryListener<ShoppingList> with
+            member _.onData(rows) = onChange (List.ofArray rows)
+            member _.onError(err) = JS.console.error ("watch shopping lists", err) }
+    |> ignore
+
+/// Live shopping items across every list: unchecked items first, oldest
+/// first within each group. The UI picks out the list it is showing.
 let watchShoppingItems (onChange: ShoppingItem list -> unit) =
     let sql =
-        "SELECT id, name, quantity, unit, done, created_at FROM shopping_items ORDER BY done, created_at, id"
+        "SELECT id, list_id, name, quantity, unit, done, created_at FROM shopping_items ORDER BY done, created_at, id"
 
     let query = db.query<ShoppingItem> {| sql = sql; parameters = [||] |}
 
@@ -197,50 +215,114 @@ let private quantityText (quantity: Quantity option) =
     | Some(Quantity.Text t) -> t
     | None -> ""
 
-/// What adding ingredients does to the list: rows whose quantity was topped
-/// up, and rows that are new. The caller shows the resulting list at once and
-/// hands the plan to `addToShoppingList` to persist.
-type ShoppingPlan = { Updated: ShoppingItem list; Inserted: ShoppingItem list }
+/// The list a user with none gets the first time they add something.
+let private newShoppingList () : ShoppingList =
+    { id = string (Guid.NewGuid())
+      name = Shared.ShoppingList.defaultName DateTime.Now
+      created_at = nowIso () }
 
-/// One row per ingredient. An unchecked row with the same name and unit is
-/// topped up instead when both quantities are numbers, so adding two recipes
-/// that need flour gives one line, not two. Pure: works off the list the UI
-/// already holds (a mirror of the table), so nothing is read from SQLite.
-let planShoppingAdd (items: ShoppingItem list) (ingredients: Cooklang.Ingredient list) =
-    let step (items: ShoppingItem list, updated: Set<string>, inserted: Set<string>) (i: Cooklang.Ingredient) =
-        let unit = defaultArg i.Unit ""
+/// True when every ingredient already has a row in the newest list, matched
+/// by name the way `planShoppingAdd` merges (case-insensitive, checked or
+/// not). Pure and in-memory: the model mirrors the tables, so this costs one
+/// pass over the list's rows and no SQLite round trip. A recipe with no
+/// ingredients, or a user with no list, has nothing to warn about.
+let allIngredientsPresent (lists: ShoppingList list) (items: ShoppingItem list) (ingredients: Cooklang.Ingredient list) =
+    match lists, ingredients with
+    | [], _
+    | _, [] -> false
+    | list :: _, _ ->
+        let names =
+            items
+            |> List.filter (fun i -> i.list_id = list.id)
+            |> List.map (fun i -> i.name.ToLowerInvariant())
+            |> Set.ofList
 
+        ingredients |> List.forall (fun i -> names.Contains(i.Name.ToLowerInvariant()))
+
+/// What adding ingredients does: the list to create when the user had none,
+/// rows whose quantity was topped up, and rows that are new. The caller
+/// shows the result at once and hands the plan to `addToShoppingList`.
+type ShoppingPlan =
+    { NewList: ShoppingList option
+      Updated: ShoppingItem list
+      Inserted: ShoppingItem list }
+
+/// One row per entry (name, quantity, unit), in the newest of `lists`
+/// (created here when there is none). An unchecked row there with the same
+/// name and unit is topped up instead when both quantities are numbers, so
+/// adding two recipes that need flour gives one line, not two. Pure: works
+/// off the lists the UI already holds (a mirror of the tables), so nothing
+/// is read from SQLite. Returns the lists and items as the UI should now
+/// show them, plus the plan.
+let private planAdd (lists: ShoppingList list) (items: ShoppingItem list) (entries: (string * Quantity option * string) list) =
+    let target, newList =
+        match lists with
+        | l :: _ -> l, None
+        | [] ->
+            let l = newShoppingList ()
+            l, Some l
+
+    let listId = target.id
+
+    let step (items: ShoppingItem list, updated: Set<string>, inserted: Set<string>) (name: string, quantity, unit) =
         let existing =
             items
             |> List.tryFind (fun r ->
-                r.name.ToLowerInvariant() = i.Name.ToLowerInvariant() && r.unit = unit && r.``done`` = 0)
+                r.list_id = listId
+                && r.name.ToLowerInvariant() = name.ToLowerInvariant()
+                && r.unit = unit
+                && r.``done`` = 0)
 
-        match existing, i.Quantity with
+        match existing, quantity with
         | Some row, Some(Quantity.Number n) when fst (Double.TryParse row.quantity) ->
             let topped = { row with quantity = string (float row.quantity + n) }
             items |> List.map (fun r -> if r.id = row.id then topped else r), Set.add row.id updated, inserted
         | _ ->
             let row =
                 { id = string (Guid.NewGuid())
-                  name = i.Name
-                  quantity = quantityText i.Quantity
+                  list_id = listId
+                  name = name
+                  quantity = quantityText quantity
                   unit = unit
                   ``done`` = 0
                   created_at = nowIso () }
 
             items @ [ row ], updated, Set.add row.id inserted
 
-    let items, updated, inserted = ingredients |> List.fold step (items, Set.empty, Set.empty)
+    let items, updated, inserted = entries |> List.fold step (items, Set.empty, Set.empty)
     // A row inserted then topped up by a later ingredient is still one insert.
     let updated = Set.difference updated inserted
     let items = items |> List.sortBy (fun i -> i.``done``, i.created_at, i.id)
 
+    (match newList with
+     | Some l -> l :: lists
+     | None -> lists),
     items,
-    { Updated = items |> List.filter (fun i -> updated.Contains i.id)
+    { NewList = newList
+      Updated = items |> List.filter (fun i -> updated.Contains i.id)
       Inserted = items |> List.filter (fun i -> inserted.Contains i.id) }
+
+/// A recipe's ingredients.
+let planShoppingAdd lists items (ingredients: Cooklang.Ingredient list) =
+    planAdd lists items (ingredients |> List.map (fun i -> i.Name, i.Quantity, defaultArg i.Unit ""))
+
+/// One item typed on the list page, taken as-is for the name.
+let planFreeItemAdd lists items (text: string) =
+    planAdd lists items [ text.Trim(), None, "" ]
 
 let addToShoppingList (plan: ShoppingPlan) =
     promise {
+        match plan.NewList with
+        | Some list ->
+            let! _ =
+                db.execute (
+                    "INSERT INTO shopping_lists (id, name, created_at) VALUES (?, ?, ?)",
+                    [| list.id; list.name; list.created_at |]
+                )
+
+            ()
+        | None -> ()
+
         for row in plan.Updated do
             let! _ = db.execute ("UPDATE shopping_items SET quantity = ? WHERE id = ?", [| row.quantity; row.id |])
             ()
@@ -248,8 +330,8 @@ let addToShoppingList (plan: ShoppingPlan) =
         for row in plan.Inserted do
             let! _ =
                 db.execute (
-                    "INSERT INTO shopping_items (id, name, quantity, unit, done, created_at) VALUES (?, ?, ?, ?, 0, ?)",
-                    [| row.id; row.name; row.quantity; row.unit; row.created_at |]
+                    "INSERT INTO shopping_items (id, list_id, name, quantity, unit, done, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
+                    [| row.id; row.list_id; row.name; row.quantity; row.unit; row.created_at |]
                 )
 
             ()
@@ -258,8 +340,5 @@ let addToShoppingList (plan: ShoppingPlan) =
 let setShoppingItemDone (id: string) (isDone: bool) =
     db.execute ("UPDATE shopping_items SET done = ? WHERE id = ?", [| (if isDone then 1 else 0); id |])
 
-let deleteShoppingItem (id: string) =
-    db.execute ("DELETE FROM shopping_items WHERE id = ?", [| id |])
-
-let clearDoneShoppingItems () =
-    db.execute ("DELETE FROM shopping_items WHERE done <> 0", [||])
+let clearDoneShoppingItems (listId: string) =
+    db.execute ("DELETE FROM shopping_items WHERE list_id = ? AND done <> 0", [| listId |])

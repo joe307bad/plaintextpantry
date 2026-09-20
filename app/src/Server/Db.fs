@@ -14,8 +14,14 @@ open Shared
 let private tables =
     Map
         [ "recipes", [ "title", "text"; "body", "text"; "created_at", "timestamptz" ]
+          "shopping_lists", [ "name", "text"; "created_at", "timestamptz" ]
           "shopping_items",
-          [ "name", "text"; "quantity", "text"; "unit", "text"; "done", "integer"; "created_at", "timestamptz" ] ]
+          [ "list_id", "uuid"
+            "name", "text"
+            "quantity", "text"
+            "unit", "text"
+            "done", "integer"
+            "created_at", "timestamptz" ] ]
 
 let private param (cmd: NpgsqlCommand) (name: string) (value: string option) =
     let v : obj =
@@ -103,8 +109,14 @@ type RecipeRow =
       Body: string
       CreatedAt: DateTimeOffset }
 
+type ShoppingListRow =
+    { Id: Guid
+      Name: string
+      CreatedAt: DateTimeOffset }
+
 type ShoppingItemRow =
     { Id: Guid
+      ListId: Guid
       Name: string
       Quantity: string
       Unit: string
@@ -143,13 +155,19 @@ let private recipeOf (r: Data.Common.DbDataReader) =
       Body = r.GetString 2
       CreatedAt = r.GetFieldValue<DateTimeOffset> 3 }
 
-let private itemOf (r: Data.Common.DbDataReader) =
+let private listOf (r: Data.Common.DbDataReader) : ShoppingListRow =
     { Id = r.GetGuid 0
       Name = r.GetString 1
-      Quantity = r.GetString 2
-      Unit = r.GetString 3
-      Done = r.GetInt32 4 <> 0
-      CreatedAt = r.GetFieldValue<DateTimeOffset> 5 }
+      CreatedAt = r.GetFieldValue<DateTimeOffset> 2 }
+
+let private itemOf (r: Data.Common.DbDataReader) : ShoppingItemRow =
+    { Id = r.GetGuid 0
+      ListId = r.GetGuid 1
+      Name = r.GetString 2
+      Quantity = r.GetString 3
+      Unit = r.GetString 4
+      Done = r.GetInt32 5 <> 0
+      CreatedAt = r.GetFieldValue<DateTimeOffset> 6 }
 
 let listRecipes cs (userId: string) =
     withConn cs (fun conn ->
@@ -208,16 +226,46 @@ let deleteRecipe cs (userId: string) (id: Guid) =
             return n = 1
         })
 
-let listShoppingItems cs (userId: string) =
+/// The user's newest list: the one adding goes into.
+let latestShoppingList cs (userId: string) =
+    withConn cs (fun conn ->
+        task {
+            let! rows =
+                readAll
+                    (command
+                        conn
+                        "SELECT id, name, created_at FROM shopping_lists WHERE user_id = @u ORDER BY created_at DESC, id LIMIT 1"
+                        [ "u", userId ])
+                    listOf
+
+            return List.tryHead rows
+        })
+
+let insertShoppingList cs (userId: string) (name: string) =
+    withConn cs (fun conn ->
+        task {
+            let id = Guid.NewGuid()
+
+            use cmd =
+                command
+                    conn
+                    "INSERT INTO shopping_lists (id, user_id, name) VALUES (@id, @u, @n)"
+                    [ "id", id; "u", userId; "n", name ]
+
+            let! _ = cmd.ExecuteNonQueryAsync()
+            return id
+        })
+
+let listShoppingItems cs (userId: string) (listId: Guid) =
     withConn cs (fun conn ->
         readAll
             (command
                 conn
-                "SELECT id, name, quantity, unit, done, created_at FROM shopping_items WHERE user_id = @u ORDER BY done, created_at"
-                [ "u", userId ])
+                "SELECT id, list_id, name, quantity, unit, done, created_at FROM shopping_items WHERE user_id = @u AND list_id = @l ORDER BY done, created_at"
+                [ "u", userId; "l", listId ])
             itemOf)
 
-let insertShoppingItems cs (userId: string) (items: (string * string * string) list) =
+let insertShoppingItems cs (userId: string) (listId: Guid) (items: (string * string * string) list) =
     withConn cs (fun conn ->
         task {
             use! tx = conn.BeginTransactionAsync()
@@ -229,8 +277,8 @@ let insertShoppingItems cs (userId: string) (items: (string * string * string) l
                 use cmd =
                     command
                         conn
-                        "INSERT INTO shopping_items (id, user_id, name, quantity, unit) VALUES (@id, @u, @n, @q, @unit)"
-                        [ "id", id; "u", userId; "n", name; "q", quantity; "unit", unit ]
+                        "INSERT INTO shopping_items (id, user_id, list_id, name, quantity, unit) VALUES (@id, @u, @l, @n, @q, @unit)"
+                        [ "id", id; "u", userId; "l", listId; "n", name; "q", quantity; "unit", unit ]
 
                 cmd.Transaction <- tx
                 let! _ = cmd.ExecuteNonQueryAsync()

@@ -1,5 +1,6 @@
 module App
 
+open System
 open Browser.Dom
 open Elmish
 open Fable.Core
@@ -62,6 +63,9 @@ type Model =
       /// Where to land after signing in: the page that hit the 401.
       ReturnTo: string list
       Recipes: Recipe list
+      /// Newest first; the head is the list shown and added to.
+      ShoppingLists: ShoppingList list
+      /// Every list's items; `currentList` picks out the ones on screen.
       ShoppingItems: ShoppingItem list
       /// `Some` while the "New Recipe" modal is open.
       NewRecipe: RecipeForm option
@@ -69,6 +73,11 @@ type Model =
       Edit: RecipeForm option
       /// Recipe awaiting delete confirmation on the list page.
       PendingDelete: string option
+      /// Recipe whose ingredients are all on the list already, awaiting
+      /// confirmation to add them again.
+      PendingShoppingAdd: string option
+      /// The blank row at the end of the shopping list.
+      NewItem: string
       /// The mobile bottom-sheet menu, toggled by the logo button.
       MenuOpen: bool }
 
@@ -78,10 +87,15 @@ type Msg =
     | SignOut
     | UrlChanged of string list
     | RecipesChanged of Recipe list
+    | ShoppingListsChanged of ShoppingList list
     | ShoppingItemsChanged of ShoppingItem list
     | AddToShoppingList of recipeId: string
+    /// Add even though every ingredient is already on the list.
+    | AddToShoppingListAnyway of recipeId: string
+    | CancelShoppingAdd
+    | NewItemChanged of string
+    | AddNewItem
     | SetShoppingItemDone of id: string * isDone: bool
-    | DeleteShoppingItem of id: string
     | ClearDoneShoppingItems
     | OpenNewRecipe
     | CloseNewRecipe
@@ -117,10 +131,13 @@ let init () =
       Session = Checking
       ReturnTo = []
       Recipes = []
+      ShoppingLists = []
       ShoppingItems = []
       NewRecipe = None
       Edit = None
       PendingDelete = None
+      PendingShoppingAdd = None
+      NewItem = ""
       MenuOpen = false },
     Cmd.batch
         [ Cmd.ofEffect (fun dispatch -> Router.onUrlChanged (UrlChanged >> dispatch))
@@ -132,6 +149,7 @@ let init () =
 let private startSync () =
     Cmd.batch
         [ Cmd.ofEffect (fun dispatch -> Db.watchRecipes (RecipesChanged >> dispatch))
+          Cmd.ofEffect (fun dispatch -> Db.watchShoppingLists (ShoppingListsChanged >> dispatch))
           Cmd.ofEffect (fun dispatch -> Db.watchShoppingItems (ShoppingItemsChanged >> dispatch))
           Cmd.ofEffect (fun _ -> Db.connect () |> Promise.catch (fun e -> console.error e) |> ignore) ]
 
@@ -139,6 +157,22 @@ let private findRecipe id (recipes: Recipe list) =
     recipes |> List.tryFind (fun r -> r.id = id)
 
 let private formOf (recipe: Recipe) = { Title = recipe.title; Body = recipe.body }
+
+let private currentList (model: Model) = List.tryHead model.ShoppingLists
+
+let private ingredientsOf (recipe: Recipe) =
+    Cooklang.ingredients (Cooklang.parse recipe.body).Recipe
+
+/// Puts a recipe's ingredients on the list, shown at once and persisted after.
+let private addToShoppingList (recipe: Recipe) (model: Model) =
+    let lists, items, plan =
+        Db.planShoppingAdd model.ShoppingLists model.ShoppingItems (ingredientsOf recipe)
+
+    { model with
+        ShoppingLists = lists
+        ShoppingItems = items
+        PendingShoppingAdd = None },
+    fireAndForget (Db.addToShoppingList plan)
 
 let update msg model =
     match msg with
@@ -177,6 +211,7 @@ let update msg model =
             | _ -> model.Edit
 
         { model with Recipes = recipes; Edit = edit }, Cmd.none
+    | ShoppingListsChanged lists -> { model with ShoppingLists = lists }, Cmd.none
     | ShoppingItemsChanged items -> { model with ShoppingItems = items }, Cmd.none
     // Every write below is applied to the model first and persisted second,
     // so the UI moves with the tap; the watched queries confirm a beat later.
@@ -184,11 +219,25 @@ let update msg model =
     // changes nothing on screen.
     | AddToShoppingList id ->
         match findRecipe id model.Recipes with
-        | Some recipe ->
-            let ingredients = Cooklang.ingredients (Cooklang.parse recipe.body).Recipe
-            let items, plan = Db.planShoppingAdd model.ShoppingItems ingredients
-            { model with ShoppingItems = items }, fireAndForget (Db.addToShoppingList plan)
+        | Some recipe when Db.allIngredientsPresent model.ShoppingLists model.ShoppingItems (ingredientsOf recipe) ->
+            // Probably a double tap; ask before doubling the quantities.
+            { model with PendingShoppingAdd = Some id }, Cmd.none
+        | Some recipe -> addToShoppingList recipe model
         | None -> model, Cmd.none
+    | AddToShoppingListAnyway id ->
+        match findRecipe id model.Recipes with
+        | Some recipe -> addToShoppingList recipe model
+        | None -> { model with PendingShoppingAdd = None }, Cmd.none
+    | CancelShoppingAdd -> { model with PendingShoppingAdd = None }, Cmd.none
+    | NewItemChanged text -> { model with NewItem = text }, Cmd.none
+    | AddNewItem ->
+        if model.NewItem.Trim() = "" then
+            model, Cmd.none
+        else
+            let lists, items, plan = Db.planFreeItemAdd model.ShoppingLists model.ShoppingItems model.NewItem
+
+            { model with ShoppingLists = lists; ShoppingItems = items; NewItem = "" },
+            fireAndForget (Db.addToShoppingList plan)
     | SetShoppingItemDone(id, isDone) ->
         let items =
             model.ShoppingItems
@@ -196,12 +245,15 @@ let update msg model =
             |> List.sortBy (fun i -> i.``done``, i.created_at, i.id)
 
         { model with ShoppingItems = items }, fireAndForget (Db.setShoppingItemDone id isDone)
-    | DeleteShoppingItem id ->
-        { model with ShoppingItems = model.ShoppingItems |> List.filter (fun i -> i.id <> id) },
-        fireAndForget (Db.deleteShoppingItem id)
     | ClearDoneShoppingItems ->
-        { model with ShoppingItems = model.ShoppingItems |> List.filter (fun i -> i.``done`` = 0) },
-        fireAndForget (Db.clearDoneShoppingItems ())
+        match currentList model with
+        | Some list ->
+            { model with
+                ShoppingItems =
+                    model.ShoppingItems
+                    |> List.filter (fun i -> i.list_id <> list.id || i.``done`` = 0) },
+            fireAndForget (Db.clearDoneShoppingItems list.id)
+        | None -> model, Cmd.none
     | OpenNewRecipe -> { model with NewRecipe = Some { Title = ""; Body = "" } }, Cmd.none
     | CloseNewRecipe -> { model with NewRecipe = None }, Cmd.none
     | NewTitleChanged title ->
@@ -282,12 +334,14 @@ let private navBar (page: Page) (user: Shared.User) dispatch =
               [ // Just the door, no wordmark, at the top left.
                 Html.a
                     [ prop.href "/"
+                      // Sits a little tighter to "Recipes" than the links do to each other.
+                      prop.className "-mr-2"
                       prop.ariaLabel "Plaintext Pantry"
                       prop.onClick (fun e ->
                           e.preventDefault ()
                           Router.navigate []
                           dispatch (UrlChanged []))
-                      prop.children [ Html.img [ prop.src "/brand/icon.png"; prop.alt ""; prop.className "h-7 w-7" ] ] ]
+                      prop.children [ Html.img [ prop.src "/brand/icon.png"; prop.alt ""; prop.className "h-5 w-5" ] ] ]
                 navLink [] "Recipes" (onRecipes page)
                 navLink [ "shopping-list" ] "Shopping list" (page = ShoppingList)
                 Html.span [ prop.className "ml-auto text-sm text-gray-500"; prop.text user.Email ]
@@ -573,6 +627,34 @@ let private listPage (model: Model) (known: CooklangEditor.KnownNames) dispatch 
           | Some recipe -> confirmDeleteModal recipe dispatch
           | None -> Html.none ]
 
+/// Shown when every ingredient of the recipe is already on the current list.
+let private confirmShoppingAddModal (recipe: Recipe) dispatch =
+    Html.div
+        [ prop.className "fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+          prop.onClick (fun _ -> dispatch CancelShoppingAdd)
+          prop.children
+              [ Html.div
+                    [ prop.className "w-full max-w-sm rounded bg-white p-4 flex flex-col gap-3"
+                      prop.onClick (fun e -> e.stopPropagation ())
+                      prop.children
+                          [ Html.p
+                                [ prop.text
+                                      "All the ingredients for this recipe are already in the current shopping list. Add them again?" ]
+                            Html.div
+                                [ prop.className "flex justify-end gap-2"
+                                  prop.children
+                                      [ Html.button
+                                            [ prop.type' "button"
+                                              prop.className "px-3 py-1 text-gray-600 hover:text-gray-900"
+                                              prop.text "Cancel"
+                                              prop.autoFocus true
+                                              prop.onClick (fun _ -> dispatch CancelShoppingAdd) ]
+                                        Html.button
+                                            [ prop.type' "button"
+                                              prop.className "bg-blue-600 px-3 py-1 text-white hover:bg-blue-700"
+                                              prop.text "Add again"
+                                              prop.onClick (fun _ -> dispatch (AddToShoppingListAnyway recipe.id)) ] ] ] ] ] ] ]
+
 let private detailPage (model: Model) (id: string) (known: CooklangEditor.KnownNames) dispatch =
     match findRecipe id model.Recipes, model.Edit with
     | Some _, Some edit ->
@@ -628,50 +710,83 @@ let private detailPage (model: Model) (id: string) (known: CooklangEditor.KnownN
             [ Html.p "Recipe not found (it may still be syncing, or it was deleted)."
               link dispatch [] "Back to recipes" ]
 
+/// The blank row at the end of the list. Enter (the keyboard's "done" on
+/// phones) adds the item and leaves the field focused for the next one;
+/// tapping away adds it too. Either way the row is blank again afterwards.
+let private newItemRow (text: string) dispatch =
+    Html.li
+        [ Html.form
+              [ prop.className "flex items-center gap-2 py-1"
+                prop.onSubmit (fun e ->
+                    e.preventDefault ()
+                    dispatch AddNewItem)
+                prop.children
+                    [ // Lines the text up with the checkboxes above without being one.
+                      Html.input [ prop.type' "checkbox"; prop.disabled true; prop.ariaHidden true; prop.tabIndex -1 ]
+                      Html.input
+                          [ prop.className "min-w-0 flex-1 bg-transparent py-0.5 outline-none placeholder:text-gray-400"
+                            prop.type' "text"
+                            prop.placeholder "Add an item"
+                            prop.ariaLabel "Add an item"
+                            prop.autoComplete "off"
+                            prop.custom ("enterKeyHint", "done")
+                            prop.value text
+                            prop.onChange (NewItemChanged >> dispatch)
+                            prop.onBlur (fun _ -> dispatch AddNewItem) ] ] ] ]
+
 let private shoppingListPage (model: Model) dispatch =
-    match model.ShoppingItems with
-    | [] -> Html.p "Nothing to buy."
-    | items ->
-        let anyDone = items |> List.exists (fun i -> i.``done`` <> 0)
+    let list = currentList model
 
-        Html.div
-            [ Html.button
-                  [ prop.type' "button"
-                    prop.className "mb-3 border border-gray-300 px-3 py-1 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                    prop.text "Clear checked"
-                    prop.disabled (not anyDone)
-                    prop.onClick (fun _ -> dispatch ClearDoneShoppingItems) ]
-              Html.ul
-                  [ prop.className "flex flex-col gap-1"
+    let items =
+        match list with
+        | Some list -> model.ShoppingItems |> List.filter (fun i -> i.list_id = list.id)
+        | None -> []
+
+    let anyDone = items |> List.exists (fun i -> i.``done`` <> 0)
+
+    Html.div
+        [ match list with
+          | Some list ->
+              // Bottom-left, on the same line as the menu button bottom-right.
+              Html.p
+                  [ prop.className "fixed bottom-4 left-4 z-50 flex h-9 items-center text-sm text-gray-500"
+                    prop.text ("Created: " + Shared.ShoppingList.age DateTime.Now ((DateTime.Parse list.created_at).ToLocalTime())) ]
+              Html.div
+                  [ // Phones: name left, button at the right edge. Desktop: both on the left.
+                    prop.className "mb-3 flex items-center justify-between gap-3 md:justify-start"
                     prop.children
-                        [ for item in items ->
-                              let isDone = item.``done`` <> 0
+                        [ Html.h2 [ prop.className "text-lg font-semibold"; prop.text list.name ]
+                          Html.button
+                              [ prop.type' "button"
+                                prop.className "border border-gray-300 px-3 py-1 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                                prop.text "Clear checked"
+                                prop.disabled (not anyDone)
+                                prop.onClick (fun _ -> dispatch ClearDoneShoppingItems) ] ] ]
+          | None -> Html.none
+          Html.ul
+              [ prop.className "flex flex-col gap-1"
+                prop.children
+                    [ for item in items do
+                          let isDone = item.``done`` <> 0
 
-                              Html.li
-                                  [ prop.className "flex items-center gap-2"
-                                    prop.children
-                                        [ // The whole row is the label, so tapping the text checks the box too.
-                                          Html.label
-                                              [ prop.className "flex flex-1 cursor-pointer select-none items-center gap-2 py-1"
-                                                prop.children
-                                                    [ Html.input
-                                                          [ prop.type' "checkbox"
-                                                            prop.isChecked isDone
-                                                            prop.onChange (fun (checked: bool) ->
-                                                                dispatch (SetShoppingItemDone(item.id, checked))) ]
-                                                      Html.span
-                                                          [ prop.className (if isDone then "text-gray-400 line-through" else "")
-                                                            prop.text (
-                                                                [ item.quantity; item.unit; item.name ]
-                                                                |> List.filter ((<>) "")
-                                                                |> String.concat " "
-                                                            ) ] ] ]
-                                          Html.button
-                                              [ prop.type' "button"
-                                                prop.className "ml-auto px-2 text-gray-400 hover:text-red-600"
-                                                prop.title "Remove"
-                                                prop.text "×"
-                                                prop.onClick (fun _ -> dispatch (DeleteShoppingItem item.id)) ] ] ] ] ] ]
+                          Html.li
+                              [ // The whole row is the label, so tapping the text checks the box too.
+                                Html.label
+                                    [ prop.className "flex cursor-pointer select-none items-center gap-2 py-1"
+                                      prop.children
+                                          [ Html.input
+                                                [ prop.type' "checkbox"
+                                                  prop.isChecked isDone
+                                                  prop.onChange (fun (isChecked: bool) ->
+                                                      dispatch (SetShoppingItemDone(item.id, isChecked))) ]
+                                            Html.span
+                                                [ prop.className (if isDone then "text-gray-400 line-through" else "")
+                                                  prop.text (
+                                                      [ item.quantity; item.unit; item.name ]
+                                                      |> List.filter ((<>) "")
+                                                      |> String.concat " "
+                                                  ) ] ] ] ]
+                      newItemRow model.NewItem dispatch ] ] ]
 
 [<ReactComponent>]
 let View () =
@@ -710,7 +825,10 @@ let View () =
                           | Login
                           | Terms
                           | Privacy -> Html.none
-                          | NotFound -> Html.p "Page not found." ] ] ]
+                          | NotFound -> Html.p "Page not found." ] ]
+              match model.PendingShoppingAdd |> Option.bind (fun id -> findRecipe id model.Recipes) with
+              | Some recipe -> confirmShoppingAddModal recipe dispatch
+              | None -> Html.none ]
 
 let root = ReactDOM.createRoot (document.getElementById "root")
 root.render (View())

@@ -42,6 +42,13 @@ type ShoppingItem =
       Unit: string
       Done: bool }
 
+/// The newest list with its items. `Id` and `Name` are null when the user
+/// has no list yet; add_shopping_items makes one.
+type ShoppingList =
+    { Id: string
+      Name: string
+      Items: ShoppingItem list }
+
 type NewShoppingItem =
     { Name: string
       /// Free text; "2", "1.5" or "some" are all fine.
@@ -141,26 +148,40 @@ type PantryTools(config: Config, http: IHttpContextAccessor) =
             return (if ok then "Deleted." else "No such recipe.")
         }
 
-    [<McpServerTool(Name = "get_shopping_list"); Description("The shopping list, unchecked items first.")>]
-    member _.GetShoppingList() : Task<ShoppingItem list> =
+    [<McpServerTool(Name = "get_shopping_list");
+      Description("The current shopping list (the newest one) and its items, unchecked first. id and name are null until something has been added.")>]
+    member _.GetShoppingList() : Task<ShoppingList> =
         task {
             require "shopping:read"
-            let! rows = Db.listShoppingItems cs user.Id
-            return List.map item rows
+            let! list = Db.latestShoppingList cs user.Id
+
+            match list with
+            | None -> return { Id = null; Name = null; Items = [] }
+            | Some l ->
+                let! rows = Db.listShoppingItems cs user.Id l.Id
+                return { Id = string l.Id; Name = l.Name; Items = List.map item rows }
         }
 
-    [<McpServerTool(Name = "add_shopping_items"); Description("Add items to the shopping list.")>]
+    [<McpServerTool(Name = "add_shopping_items");
+      Description("Add items to the current shopping list, creating one named SL-MMDD (today) if the user has none.")>]
     member _.AddShoppingItems([<Description("Items to add")>] items: NewShoppingItem list) : Task<ShoppingItem list> =
         task {
             require "shopping:write"
+            let! list = Db.latestShoppingList cs user.Id
+
+            let! listId =
+                match list with
+                | Some l -> Task.FromResult l.Id
+                | None -> Db.insertShoppingList cs user.Id (Shared.ShoppingList.defaultName DateTime.Now)
 
             let! ids =
                 Db.insertShoppingItems
                     cs
                     user.Id
+                    listId
                     (items |> List.map (fun i -> i.Name, (i.Quantity |> Option.ofObj |> Option.defaultValue ""), (i.Unit |> Option.ofObj |> Option.defaultValue "")))
 
-            let! rows = Db.listShoppingItems cs user.Id
+            let! rows = Db.listShoppingItems cs user.Id listId
             return rows |> List.filter (fun r -> List.contains r.Id ids) |> List.map item
         }
 

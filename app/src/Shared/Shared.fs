@@ -1,5 +1,6 @@
 namespace Shared
 
+open System
 open Thoth.Json.Core
 
 /// What the PowerSync client needs to open a sync connection.
@@ -8,6 +9,20 @@ type SyncCredentials = { Endpoint: string; Token: string }
 /// The signed-in user, as /api/auth/me reports it. `Id` is the Keycloak
 /// subject and is what every row's `user_id` holds.
 type User = { Id: string; Email: string; Name: string }
+
+/// A shopping list is only a name for now: the client and the MCP tools
+/// both add to the newest one, and create one named after today when the
+/// user has none. Names are free text and may repeat.
+module ShoppingList =
+    let defaultName (date: DateTime) = sprintf "SL-%02d%02d" date.Month date.Day
+
+    /// How long ago a list was made, in calendar days: "today", "yesterday",
+    /// "3 days ago". Both dates are compared as local dates.
+    let age (today: DateTime) (created: DateTime) =
+        match (today.Date - created.Date).Days with
+        | d when d <= 0 -> "today"
+        | 1 -> "yesterday"
+        | d -> $"{d} days ago"
 
 /// One entry from the PowerSync client upload queue, in the shape the
 /// server applies to Postgres. Values are strings (or null); Postgres
