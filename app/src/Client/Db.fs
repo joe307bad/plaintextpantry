@@ -27,6 +27,17 @@ type ShoppingItem =
       ``done``: int
       created_at: string }
 
+/// Row shape of the local `menus` table. A shopping list's twin: only a name.
+type Menu = { id: string; name: string; created_at: string }
+
+/// Row shape of the local `menu_recipes` table: one row per time a recipe
+/// was added to a menu.
+type MenuRecipe =
+    { id: string
+      menu_id: string
+      recipe_id: string
+      created_at: string }
+
 /// Calls to the F# server, using the coders shared with it.
 module private Api =
     let private ensureOk (response: Response) =
@@ -87,7 +98,9 @@ let db =
             "quantity", column.text
             "unit", column.text
             "done", column.integer
-            "created_at", column.text ] ]
+            "created_at", column.text ]
+          "menus", [ "name", column.text; "created_at", column.text ]
+          "menu_recipes", [ "menu_id", column.text; "recipe_id", column.text; "created_at", column.text ] ]
 
 let private toCrudOp (entry: CrudEntry) : CrudOp =
     let data =
@@ -183,6 +196,29 @@ let watchShoppingItems (onChange: ShoppingItem list -> unit) =
             member _.onError(err) = JS.console.error ("watch shopping items", err) }
     |> ignore
 
+/// Live menus, newest first. The head is the one adding goes into.
+let watchMenus (onChange: Menu list -> unit) =
+    let sql = "SELECT id, name, created_at FROM menus ORDER BY created_at DESC, id"
+    let query = db.query<Menu> {| sql = sql; parameters = [||] |}
+
+    query.watch().registerListener
+        { new WatchedQueryListener<Menu> with
+            member _.onData(rows) = onChange (List.ofArray rows)
+            member _.onError(err) = JS.console.error ("watch menus", err) }
+    |> ignore
+
+/// Live menu entries across every menu, in the order they were added. The
+/// UI picks out the menu it is showing.
+let watchMenuRecipes (onChange: MenuRecipe list -> unit) =
+    let sql = "SELECT id, menu_id, recipe_id, created_at FROM menu_recipes ORDER BY created_at, id"
+    let query = db.query<MenuRecipe> {| sql = sql; parameters = [||] |}
+
+    query.watch().registerListener
+        { new WatchedQueryListener<MenuRecipe> with
+            member _.onData(rows) = onChange (List.ofArray rows)
+            member _.onError(err) = JS.console.error ("watch menu recipes", err) }
+    |> ignore
+
 let watchStatus (onChange: SyncStatus -> unit) =
     onChange db.currentStatus
     db.registerListener (createObj [ "statusChanged" ==> onChange ]) |> ignore
@@ -204,8 +240,13 @@ let addRecipe (recipe: Recipe) =
 let updateRecipe (id: string) (title: string) (body: string) =
     db.execute ("UPDATE recipes SET title = ?, body = ? WHERE id = ?", [| title; body; id |])
 
+/// Also takes the recipe off every menu it was on.
 let deleteRecipe (id: string) =
-    db.execute ("DELETE FROM recipes WHERE id = ?", [| id |])
+    promise {
+        let! _ = db.execute ("DELETE FROM recipes WHERE id = ?", [| id |])
+        let! _ = db.execute ("DELETE FROM menu_recipes WHERE recipe_id = ?", [| id |])
+        ()
+    }
 
 type private Quantity = Cooklang.Quantity
 
@@ -342,3 +383,66 @@ let setShoppingItemDone (id: string) (isDone: bool) =
 
 let clearDoneShoppingItems (listId: string) =
     db.execute ("DELETE FROM shopping_items WHERE list_id = ? AND done <> 0", [| listId |])
+
+// ---------------------------------------------------------------------------
+// Menus
+// ---------------------------------------------------------------------------
+
+/// What adding a recipe to a menu does: the menu to create when the user had
+/// none, and the new entry. Shown at once, then handed to `addToMenu`.
+type MenuPlan = { NewMenu: Menu option; Inserted: MenuRecipe }
+
+/// One entry in the newest of `menus` (created here when there is none).
+/// Every add is a new row, so a recipe can be on a menu twice. Pure, like
+/// `planShoppingAdd`: returns the menus and entries as the UI should now
+/// show them, plus the plan.
+let planMenuAdd (menus: Menu list) (entries: MenuRecipe list) (recipeId: string) =
+    let target, newMenu =
+        match menus with
+        | m :: _ -> m, None
+        | [] ->
+            let m: Menu =
+                { id = string (Guid.NewGuid())
+                  name = Shared.Menu.defaultName DateTime.Now
+                  created_at = nowIso () }
+
+            m, Some m
+
+    let entry =
+        { id = string (Guid.NewGuid())
+          menu_id = target.id
+          recipe_id = recipeId
+          created_at = nowIso () }
+
+    (match newMenu with
+     | Some m -> m :: menus
+     | None -> menus),
+    entries @ [ entry ],
+    { NewMenu = newMenu; Inserted = entry }
+
+let addToMenu (plan: MenuPlan) =
+    promise {
+        match plan.NewMenu with
+        | Some menu ->
+            let! _ =
+                db.execute (
+                    "INSERT INTO menus (id, name, created_at) VALUES (?, ?, ?)",
+                    [| menu.id; menu.name; menu.created_at |]
+                )
+
+            ()
+        | None -> ()
+
+        let e = plan.Inserted
+
+        let! _ =
+            db.execute (
+                "INSERT INTO menu_recipes (id, menu_id, recipe_id, created_at) VALUES (?, ?, ?, ?)",
+                [| e.id; e.menu_id; e.recipe_id; e.created_at |]
+            )
+
+        ()
+    }
+
+let removeMenuRecipe (id: string) =
+    db.execute ("DELETE FROM menu_recipes WHERE id = ?", [| id |])

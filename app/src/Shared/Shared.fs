@@ -10,19 +10,26 @@ type SyncCredentials = { Endpoint: string; Token: string }
 /// subject and is what every row's `user_id` holds.
 type User = { Id: string; Email: string; Name: string }
 
+/// How long ago something was made, in calendar days: "today", "yesterday",
+/// "3 days ago". Both dates are compared as local dates.
+module Created =
+    let age (today: DateTime) (created: DateTime) =
+        match (today.Date - created.Date).Days with
+        | d when d <= 0 -> "today"
+        | 1 -> "yesterday"
+        | d -> $"{d} days ago"
+
 /// A shopping list is only a name for now: the client and the MCP tools
 /// both add to the newest one, and create one named after today when the
 /// user has none. Names are free text and may repeat.
 module ShoppingList =
     let defaultName (date: DateTime) = sprintf "SL-%02d%02d" date.Month date.Day
 
-    /// How long ago a list was made, in calendar days: "today", "yesterday",
-    /// "3 days ago". Both dates are compared as local dates.
-    let age (today: DateTime) (created: DateTime) =
-        match (today.Date - created.Date).Days with
-        | d when d <= 0 -> "today"
-        | 1 -> "yesterday"
-        | d -> $"{d} days ago"
+/// A menu is a shopping list's twin for recipes: a name, and the recipes
+/// added to it. Adding goes into the newest one, created on first use and
+/// named after today; names may repeat.
+module Menu =
+    let defaultName (date: DateTime) = sprintf "M-%02d%02d" date.Month date.Day
 
 /// One entry from the PowerSync client upload queue, in the shape the
 /// server applies to Postgres. Values are strings (or null); Postgres

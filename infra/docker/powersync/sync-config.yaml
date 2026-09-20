@@ -17,3 +17,9 @@ streams:
   shopping_items:
     auto_subscribe: true
     query: SELECT * FROM shopping_items WHERE user_id = auth.user_id()
+  menus:
+    auto_subscribe: true
+    query: SELECT * FROM menus WHERE user_id = auth.user_id()
+  menu_recipes:
+    auto_subscribe: true
+    query: SELECT * FROM menu_recipes WHERE user_id = auth.user_id()

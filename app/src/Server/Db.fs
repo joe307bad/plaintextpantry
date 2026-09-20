@@ -21,7 +21,9 @@ let private tables =
             "quantity", "text"
             "unit", "text"
             "done", "integer"
-            "created_at", "timestamptz" ] ]
+            "created_at", "timestamptz" ]
+          "menus", [ "name", "text"; "created_at", "timestamptz" ]
+          "menu_recipes", [ "menu_id", "uuid"; "recipe_id", "uuid"; "created_at", "timestamptz" ] ]
 
 let private param (cmd: NpgsqlCommand) (name: string) (value: string option) =
     let v : obj =
@@ -218,11 +220,20 @@ let updateRecipe cs (userId: string) (id: Guid) (title: string option) (body: st
             return n = 1
         })
 
+/// Also drops the recipe from any menu it was on.
 let deleteRecipe cs (userId: string) (id: Guid) =
     withConn cs (fun conn ->
         task {
             use cmd = command conn "DELETE FROM recipes WHERE id = @id AND user_id = @u" [ "id", id; "u", userId ]
             let! n = cmd.ExecuteNonQueryAsync()
+
+            if n = 1 then
+                use cmd =
+                    command conn "DELETE FROM menu_recipes WHERE recipe_id = @id AND user_id = @u" [ "id", id; "u", userId ]
+
+                let! _ = cmd.ExecuteNonQueryAsync()
+                ()
+
             return n = 1
         })
 

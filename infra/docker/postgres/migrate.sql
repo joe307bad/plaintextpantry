@@ -31,3 +31,21 @@ UPDATE shopping_items i
 SET list_id = (SELECT id FROM shopping_lists l WHERE l.user_id = i.user_id ORDER BY created_at DESC LIMIT 1)
 WHERE i.list_id IS NULL;
 ALTER TABLE shopping_items ALTER COLUMN list_id SET NOT NULL;
+
+-- Menus: a name plus one row per recipe added to it.
+CREATE TABLE IF NOT EXISTS menus (
+    id          uuid PRIMARY KEY,
+    user_id     text NOT NULL,
+    name        text NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS menu_recipes (
+    id          uuid PRIMARY KEY,
+    user_id     text NOT NULL,
+    menu_id     uuid NOT NULL,
+    recipe_id   uuid NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS menus_user_id        ON menus (user_id);
+CREATE INDEX IF NOT EXISTS menu_recipes_user_id ON menu_recipes (user_id);
+CREATE INDEX IF NOT EXISTS menu_recipes_menu_id ON menu_recipes (menu_id);

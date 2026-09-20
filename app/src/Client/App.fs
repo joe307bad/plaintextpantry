@@ -35,6 +35,7 @@ type Page =
     | RecipeList
     | RecipeDetail of id: string
     | ShoppingList
+    | Menu
     | Login
     | Terms
     | Privacy
@@ -67,12 +68,18 @@ type Model =
       ShoppingLists: ShoppingList list
       /// Every list's items; `currentList` picks out the ones on screen.
       ShoppingItems: ShoppingItem list
+      /// Newest first; the head is the menu shown and added to.
+      Menus: Menu list
+      /// Every menu's entries; `currentMenu` picks out the ones on screen.
+      MenuRecipes: MenuRecipe list
       /// `Some` while the "New Recipe" modal is open.
       NewRecipe: RecipeForm option
       /// Detail-page form; `None` until the recipe being viewed has loaded.
       Edit: RecipeForm option
       /// Recipe awaiting delete confirmation on the list page.
       PendingDelete: string option
+      /// Menu entry awaiting confirmation to be taken off the menu.
+      PendingMenuRemove: string option
       /// Recipe whose ingredients are all on the list already, awaiting
       /// confirmation to add them again.
       PendingShoppingAdd: string option
@@ -89,6 +96,12 @@ type Msg =
     | RecipesChanged of Recipe list
     | ShoppingListsChanged of ShoppingList list
     | ShoppingItemsChanged of ShoppingItem list
+    | MenusChanged of Menu list
+    | MenuRecipesChanged of MenuRecipe list
+    | AddToMenu of recipeId: string
+    | ConfirmMenuRemove of id: string
+    | CancelMenuRemove
+    | RemoveFromMenu of id: string
     | AddToShoppingList of recipeId: string
     /// Add even though every ingredient is already on the list.
     | AddToShoppingListAnyway of recipeId: string
@@ -116,6 +129,7 @@ let private parseUrl (segments: string list) =
     | [] -> RecipeList
     | [ "recipe"; id ] -> RecipeDetail id
     | [ "shopping-list" ] -> ShoppingList
+    | [ "menu" ] -> Menu
     | [ "login" ] -> Login
     | [ "terms" ] -> Terms
     | [ "privacy" ] -> Privacy
@@ -133,9 +147,12 @@ let init () =
       Recipes = []
       ShoppingLists = []
       ShoppingItems = []
+      Menus = []
+      MenuRecipes = []
       NewRecipe = None
       Edit = None
       PendingDelete = None
+      PendingMenuRemove = None
       PendingShoppingAdd = None
       NewItem = ""
       MenuOpen = false },
@@ -151,6 +168,8 @@ let private startSync () =
         [ Cmd.ofEffect (fun dispatch -> Db.watchRecipes (RecipesChanged >> dispatch))
           Cmd.ofEffect (fun dispatch -> Db.watchShoppingLists (ShoppingListsChanged >> dispatch))
           Cmd.ofEffect (fun dispatch -> Db.watchShoppingItems (ShoppingItemsChanged >> dispatch))
+          Cmd.ofEffect (fun dispatch -> Db.watchMenus (MenusChanged >> dispatch))
+          Cmd.ofEffect (fun dispatch -> Db.watchMenuRecipes (MenuRecipesChanged >> dispatch))
           Cmd.ofEffect (fun _ -> Db.connect () |> Promise.catch (fun e -> console.error e) |> ignore) ]
 
 let private findRecipe id (recipes: Recipe list) =
@@ -159,6 +178,8 @@ let private findRecipe id (recipes: Recipe list) =
 let private formOf (recipe: Recipe) = { Title = recipe.title; Body = recipe.body }
 
 let private currentList (model: Model) = List.tryHead model.ShoppingLists
+
+let private currentMenu (model: Model) = List.tryHead model.Menus
 
 let private ingredientsOf (recipe: Recipe) =
     Cooklang.ingredients (Cooklang.parse recipe.body).Recipe
@@ -213,6 +234,8 @@ let update msg model =
         { model with Recipes = recipes; Edit = edit }, Cmd.none
     | ShoppingListsChanged lists -> { model with ShoppingLists = lists }, Cmd.none
     | ShoppingItemsChanged items -> { model with ShoppingItems = items }, Cmd.none
+    | MenusChanged menus -> { model with Menus = menus }, Cmd.none
+    | MenuRecipesChanged entries -> { model with MenuRecipes = entries }, Cmd.none
     // Every write below is applied to the model first and persisted second,
     // so the UI moves with the tap; the watched queries confirm a beat later.
     // Lists are kept in the order the queries use, so that confirmation
@@ -229,6 +252,16 @@ let update msg model =
         | Some recipe -> addToShoppingList recipe model
         | None -> { model with PendingShoppingAdd = None }, Cmd.none
     | CancelShoppingAdd -> { model with PendingShoppingAdd = None }, Cmd.none
+    | AddToMenu id ->
+        let menus, entries, plan = Db.planMenuAdd model.Menus model.MenuRecipes id
+        { model with Menus = menus; MenuRecipes = entries }, fireAndForget (Db.addToMenu plan)
+    | ConfirmMenuRemove id -> { model with PendingMenuRemove = Some id }, Cmd.none
+    | CancelMenuRemove -> { model with PendingMenuRemove = None }, Cmd.none
+    | RemoveFromMenu id ->
+        { model with
+            MenuRecipes = model.MenuRecipes |> List.filter (fun e -> e.id <> id)
+            PendingMenuRemove = None },
+        fireAndForget (Db.removeMenuRecipe id)
     | NewItemChanged text -> { model with NewItem = text }, Cmd.none
     | AddNewItem ->
         if model.NewItem.Trim() = "" then
@@ -294,7 +327,8 @@ let update msg model =
             Page = RecipeList
             Edit = None
             PendingDelete = None
-            Recipes = model.Recipes |> List.filter (fun r -> r.id <> id) },
+            Recipes = model.Recipes |> List.filter (fun r -> r.id <> id)
+            MenuRecipes = model.MenuRecipes |> List.filter (fun e -> e.recipe_id <> id) },
         fireAndForget (Db.deleteRecipe id)
     | ToggleMenu -> { model with MenuOpen = not model.MenuOpen }, Cmd.none
     | Ignore -> model, Cmd.none
@@ -343,6 +377,7 @@ let private navBar (page: Page) (user: Shared.User) dispatch =
                           dispatch (UrlChanged []))
                       prop.children [ Html.img [ prop.src "/brand/icon.png"; prop.alt ""; prop.className "h-5 w-5" ] ] ]
                 navLink [] "Recipes" (onRecipes page)
+                navLink [ "menu" ] "Menu" (page = Menu)
                 navLink [ "shopping-list" ] "Shopping list" (page = ShoppingList)
                 Html.span [ prop.className "ml-auto text-sm text-gray-500"; prop.text user.Email ]
                 Html.button
@@ -374,6 +409,7 @@ let private mobileMenu (page: Page) (user: Shared.User) (isOpen: bool) dispatch 
                               "sheet-in fixed inset-x-0 bottom-0 z-40 border-t border-gray-200 bg-white px-6 pt-4 pb-16"
                           prop.children
                               [ navLink [] "Recipes" (onRecipes page)
+                                navLink [ "menu" ] "Menu" (page = Menu)
                                 navLink [ "shopping-list" ] "Shopping list" (page = ShoppingList)
                                 Html.div
                                     [ prop.className "mt-3 flex items-center justify-between border-t border-gray-200 pt-4"
@@ -613,12 +649,20 @@ let private listPage (model: Model) (known: CooklangEditor.KnownNames) dispatch 
                               Html.li
                                   [ prop.className "flex items-center gap-2"
                                     prop.children
-                                        [ Html.button
+                                        [ // Same box as the number on the menu page, so the
+                                          // + here and the × there share a column.
+                                          Html.button
                                               [ prop.type' "button"
-                                                prop.className "px-1 text-gray-400 hover:text-red-600"
+                                                prop.className "w-6 shrink-0 px-1 text-left text-gray-400 hover:text-red-600"
                                                 prop.title "Delete recipe"
                                                 prop.text "×"
                                                 prop.onClick (fun _ -> dispatch (ConfirmDelete r.id)) ]
+                                          Html.button
+                                              [ prop.type' "button"
+                                                prop.className "px-1 text-gray-400 hover:text-green-700"
+                                                prop.title "Add to menu"
+                                                prop.text "+"
+                                                prop.onClick (fun _ -> dispatch (AddToMenu r.id)) ]
                                           linkWith "text-blue-600 underline hover:text-blue-800" dispatch [ "recipe"; r.id ] r.title ] ] ] ]
           match model.NewRecipe with
           | Some recipe -> newRecipeModal recipe known dispatch
@@ -734,6 +778,10 @@ let private newItemRow (text: string) dispatch =
                             prop.onChange (NewItemChanged >> dispatch)
                             prop.onBlur (fun _ -> dispatch AddNewItem) ] ] ] ]
 
+/// "Created: 3 days ago", from a row's ISO timestamp.
+let private createdAge (createdAt: string) =
+    "Created: " + Shared.Created.age DateTime.Now ((DateTime.Parse createdAt).ToLocalTime())
+
 let private shoppingListPage (model: Model) dispatch =
     let list = currentList model
 
@@ -750,7 +798,7 @@ let private shoppingListPage (model: Model) dispatch =
               // Bottom-left, on the same line as the menu button bottom-right.
               Html.p
                   [ prop.className "fixed bottom-4 left-4 z-50 flex h-9 items-center text-sm text-gray-500"
-                    prop.text ("Created: " + Shared.ShoppingList.age DateTime.Now ((DateTime.Parse list.created_at).ToLocalTime())) ]
+                    prop.text (createdAge list.created_at) ]
               Html.div
                   [ // Phones: name left, button at the right edge. Desktop: both on the left.
                     prop.className "mb-3 flex items-center justify-between gap-3 md:justify-start"
@@ -788,6 +836,98 @@ let private shoppingListPage (model: Model) dispatch =
                                                   ) ] ] ] ]
                       newItemRow model.NewItem dispatch ] ] ]
 
+let private confirmMenuRemoveModal (entry: MenuRecipe) (recipe: Recipe) dispatch =
+    Html.div
+        [ prop.className "fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+          prop.onClick (fun _ -> dispatch CancelMenuRemove)
+          prop.children
+              [ Html.div
+                    [ prop.className "w-full max-w-sm rounded bg-white p-4 flex flex-col gap-3"
+                      prop.onClick (fun e -> e.stopPropagation ())
+                      prop.children
+                          [ Html.p [ prop.text $"Remove \"{recipe.title}\" from the menu?" ]
+                            Html.div
+                                [ prop.className "flex justify-end gap-2"
+                                  prop.children
+                                      [ Html.button
+                                            [ prop.type' "button"
+                                              prop.className "px-3 py-1 text-gray-600 hover:text-gray-900"
+                                              prop.text "Cancel"
+                                              prop.autoFocus true
+                                              prop.onClick (fun _ -> dispatch CancelMenuRemove) ]
+                                        Html.button
+                                            [ prop.type' "button"
+                                              prop.className "bg-red-600 px-3 py-1 text-white hover:bg-red-700"
+                                              prop.text "Remove"
+                                              prop.onClick (fun _ -> dispatch (RemoveFromMenu entry.id)) ] ] ] ] ] ] ]
+
+/// The current menu: its recipes in the order they were added, each with a
+/// badge when the current shopping list already has all its ingredients.
+let private menuPage (model: Model) dispatch =
+    let menu = currentMenu model
+
+    let entries =
+        match menu with
+        | Some menu -> model.MenuRecipes |> List.filter (fun e -> e.menu_id = menu.id)
+        | None -> []
+
+    Html.div
+        [ match menu with
+          | Some menu ->
+              // Bottom-left, on the same line as the menu button bottom-right.
+              Html.p
+                  [ prop.className "fixed bottom-4 left-4 z-50 flex h-9 items-center text-sm text-gray-500"
+                    prop.text (createdAge menu.created_at) ]
+              // As tall as the recipe list's "New Recipe" button, so the two
+              // lists start on the same line.
+              Html.div
+                  [ prop.className "mb-3 flex h-8 items-center"
+                    prop.children [ Html.h2 [ prop.className "text-lg font-semibold"; prop.text menu.name ] ] ]
+          | None -> Html.none
+          match entries with
+          | [] -> Html.p "No recipes on the menu yet. Use the + next to a recipe to add it."
+          | entries ->
+              Html.ul
+                  [ prop.className "flex flex-col gap-1"
+                    prop.children
+                        [ // An entry whose recipe hasn't synced yet (or was
+                          // deleted elsewhere) has nothing to show, and
+                          // doesn't take a number.
+                          let shown =
+                              entries |> List.choose (fun e -> findRecipe e.recipe_id model.Recipes |> Option.map (fun r -> e, r))
+
+                          for i, (e, r) in List.indexed shown do
+                              let inShoppingList =
+                                  Db.allIngredientsPresent model.ShoppingLists model.ShoppingItems (ingredientsOf r)
+
+                              Html.li
+                                  [ prop.className "flex items-center gap-2"
+                                    prop.children
+                                        [ // Same left edge and padding as the × on the
+                                          // recipe list, so the two pages line up.
+                                          Html.span
+                                              [ prop.className "w-6 shrink-0 px-1 text-left text-sm text-gray-500 tabular-nums"
+                                                prop.text $"{i + 1}." ]
+                                          Html.button
+                                              [ prop.type' "button"
+                                                prop.className "px-1 text-gray-400 hover:text-red-600"
+                                                prop.title "Remove from menu"
+                                                prop.text "×"
+                                                prop.onClick (fun _ -> dispatch (ConfirmMenuRemove e.id)) ]
+                                          linkWith "text-blue-600 underline hover:text-blue-800" dispatch [ "recipe"; r.id ] r.title
+                                          if inShoppingList then
+                                              Html.span
+                                                  [ prop.className "text-xs text-gray-500"
+                                                    prop.text "(in shopping list)" ] ] ] ] ]
+          let pending =
+              model.PendingMenuRemove
+              |> Option.bind (fun id -> model.MenuRecipes |> List.tryFind (fun e -> e.id = id))
+              |> Option.bind (fun e -> findRecipe e.recipe_id model.Recipes |> Option.map (fun r -> e, r))
+
+          match pending with
+          | Some(entry, recipe) -> confirmMenuRemoveModal entry recipe dispatch
+          | None -> Html.none ]
+
 [<ReactComponent>]
 let View () =
     let model, dispatch = React.useElmish (init, update)
@@ -822,6 +962,7 @@ let View () =
                           | RecipeList -> listPage model known dispatch
                           | RecipeDetail id -> detailPage model id known dispatch
                           | ShoppingList -> shoppingListPage model dispatch
+                          | Menu -> menuPage model dispatch
                           | Login
                           | Terms
                           | Privacy -> Html.none

@@ -41,10 +41,32 @@ CREATE TABLE shopping_items (
     created_at  timestamptz NOT NULL DEFAULT now()
 );
 
+-- A menu is a shopping list's twin for recipes: a name, plus one
+-- menu_recipes row per recipe added (the same recipe may be added twice).
+-- No foreign keys, like the rest of the schema: rows arrive from the sync
+-- upload queue in client order and deletes are cascaded by the app.
+CREATE TABLE menus (
+    id          uuid PRIMARY KEY,
+    user_id     text NOT NULL,
+    name        text NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE menu_recipes (
+    id          uuid PRIMARY KEY,
+    user_id     text NOT NULL,
+    menu_id     uuid NOT NULL,
+    recipe_id   uuid NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE INDEX recipes_user_id ON recipes (user_id);
 CREATE INDEX shopping_lists_user_id ON shopping_lists (user_id);
 CREATE INDEX shopping_items_user_id ON shopping_items (user_id);
 CREATE INDEX shopping_items_list_id ON shopping_items (list_id);
+CREATE INDEX menus_user_id ON menus (user_id);
+CREATE INDEX menu_recipes_user_id ON menu_recipes (user_id);
+CREATE INDEX menu_recipes_menu_id ON menu_recipes (menu_id);
 
 CREATE PUBLICATION powersync FOR ALL TABLES;
 SQL

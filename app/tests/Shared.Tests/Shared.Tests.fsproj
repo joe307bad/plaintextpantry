@@ -8,6 +8,7 @@
   <ItemGroup>
     <Compile Include="CooklangTests.fs" />
     <Compile Include="ShoppingListTests.fs" />
+    <Compile Include="MenuTests.fs" />
     <!-- github.com/cooklang/spec/blob/main/tests/canonical.yaml, vendored verbatim. -->
     <Content Include="canonical.yaml" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

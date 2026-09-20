@@ -18,9 +18,9 @@ let ``age counts calendar days`` (daysAgo: int, expected: string) =
     let today = DateTime(2026, 9, 19, 8, 0, 0)
     // Late the evening `daysAgo` days back: still that many calendar days.
     let created = today.AddDays(float -daysAgo).Date.AddHours 23.0
-    Assert.Equal(expected, ShoppingList.age today created)
+    Assert.Equal(expected, Created.age today created)
 
 [<Fact>]
 let ``a clock skewed into the future still reads today`` () =
     let today = DateTime(2026, 9, 19)
-    Assert.Equal("today", ShoppingList.age today (today.AddDays 1.0))
+    Assert.Equal("today", Created.age today (today.AddDays 1.0))
