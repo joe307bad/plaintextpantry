@@ -457,7 +457,7 @@ let planMenuAdd (menus: Menu list) (entries: MenuRecipe list) (recipeId: string)
         | [] ->
             let m: Menu =
                 { id = string (Guid.NewGuid())
-                  name = Shared.Menu.defaultName DateTime.Now
+                  name = Shared.Menu.defaultName DateTime.Now (Random())
                   created_at = nowIso () }
 
             m, Some m

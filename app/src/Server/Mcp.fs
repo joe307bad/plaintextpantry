@@ -166,7 +166,7 @@ type PantryTools(config: Config, http: IHttpContextAccessor) =
 
             match menu with
             | Some m -> return m.Id
-            | None -> return! Db.insertMenu cs user.Id (Shared.Menu.defaultName DateTime.Now)
+            | None -> return! Db.insertMenu cs user.Id (Shared.Menu.defaultName DateTime.Now (Random()))
         }
 
     /// The current menu's sides, for the shopping list. Empty with no menu.
@@ -353,7 +353,7 @@ type PantryTools(config: Config, http: IHttpContextAccessor) =
         }
 
     [<McpServerTool(Name = "add_to_menu");
-      Description("Add a recipe to the current menu, creating one named M-MMDD (today) if the user has none, and put its ingredients on the shopping list (skipped when they are all there already). The same recipe can be added more than once.")>]
+      Description("Add a recipe to the current menu, creating one named M-MMDD-word-word (today, plus two random words) if the user has none, and put its ingredients on the shopping list (skipped when they are all there already). The same recipe can be added more than once.")>]
     member _.AddToMenu([<Description("Recipe id")>] recipeId: string) : Task<MenuEntry> =
         task {
             require "menus:write"
@@ -437,7 +437,7 @@ type PantryTools(config: Config, http: IHttpContextAccessor) =
         }
 
     [<McpServerTool(Name = "archive_menu");
-      Description("Put the current menu away, recipes and sides included. This is how a new menu starts: the next add_to_menu creates one named M-MMDD.")>]
+      Description("Put the current menu away, recipes and sides included. This is how a new menu starts: the next add_to_menu creates one named M-MMDD-word-word.")>]
     member _.ArchiveMenu() : Task<string> =
         task {
             require "menus:write"

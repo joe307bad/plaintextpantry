@@ -27,9 +27,22 @@ module ShoppingList =
 
 /// A menu is a shopping list's twin for recipes: a name, and the recipes
 /// added to it. Adding goes into the newest one, created on first use and
-/// named after today; names may repeat.
+/// named after today plus two random words ("M-0920-silly-fiddle") so two
+/// menus from the same day can be told apart; names may still repeat.
 module Menu =
-    let defaultName (date: DateTime) = sprintf "M-%02d%02d" date.Month date.Day
+    let adjectives =
+        [| "silly"; "big"; "wobbly"; "sleepy"; "fancy"; "grumpy"; "tiny"; "jolly"; "snazzy"; "bouncy"
+           "crispy"; "soggy"; "spicy"; "zesty"; "chunky"; "fluffy"; "toasty"; "peppy"; "dizzy"; "cheeky"
+           "mellow"; "nifty"; "plucky"; "quirky"; "rusty"; "shiny"; "smoky"; "sunny"; "tangy"; "wonky" |]
+
+    let nouns =
+        [| "fiddle"; "bongo"; "pickle"; "waffle"; "noodle"; "biscuit"; "teapot"; "walrus"; "muffin"; "kazoo"
+           "turnip"; "dumpling"; "pretzel"; "gumbo"; "radish"; "goblin"; "banjo"; "yeti"; "otter"; "llama"
+           "pancake"; "taco"; "crumpet"; "nugget"; "spatula"; "ladle"; "kettle"; "pudding"; "scone"; "tuba" |]
+
+    let defaultName (date: DateTime) (random: Random) =
+        let pick (words: string[]) = words.[random.Next words.Length]
+        sprintf "M-%02d%02d-%s-%s" date.Month date.Day (pick adjectives) (pick nouns)
 
 /// One entry from the PowerSync client upload queue, in the shape the
 /// server applies to Postgres. Values are strings (or null); Postgres
