@@ -27,6 +27,10 @@ type Config =
       /// internal `http://keycloak:8080`. Token issuer/audience checks are
       /// unaffected by this.
       AllowInsecureKeycloak: bool
+      /// Where the session-cookie keys live. Unset (local dev) leaves them
+      /// in the user profile; prod bind-mounts a directory on the data
+      /// volume so a redeploy doesn't sign everyone out. See Auth.configure.
+      DataProtectionKeysDir: string option
       /// Local dev only (set by dev.sh): "user:password" of a Keycloak
       /// account that the login button signs in directly, so the /login page
       /// can be worked on without ever seeing Keycloak's. Never set in prod.
@@ -61,6 +65,10 @@ let load () =
       KeycloakClientSecret = env "KEYCLOAK_CLIENT_SECRET" "plaintextpantry-local-dev-client-secret"
       McpResource = (env "MCP_RESOURCE" "http://localhost:5050/mcp").TrimEnd '/'
       AllowInsecureKeycloak = metadataUrl.StartsWith "http://"
+      DataProtectionKeysDir =
+        match env "DATA_PROTECTION_KEYS_DIR" "" with
+        | "" -> None
+        | dir -> Some dir
       DevAutoLogin =
         match (env "DEV_AUTO_LOGIN" "").Split(':', 2) with
         | [| user; password |] -> Some(user, password)

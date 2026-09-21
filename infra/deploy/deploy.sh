@@ -55,8 +55,10 @@ umask 022
 # Bind-mount targets on the persistent volume. Postgres must own its dir
 # (uid 999 in the official image); a bind mount to a missing path would be
 # created root-owned and initdb would refuse it.
-mkdir -p /data/postgres /data/caddy/data /data/caddy/config
+# The server image runs as `app` (uid 1654) and must own its key directory.
+mkdir -p /data/postgres /data/caddy/data /data/caddy/config /data/server/keys
 chown 999:999 /data/postgres
+chown 1654:1654 /data/server/keys && chmod 700 /data/server/keys
 
 # Keycloak is a JVM on a 2 GB box: a swapfile keeps a bad day from being an
 # OOM-killed Postgres. Root volume, created once.

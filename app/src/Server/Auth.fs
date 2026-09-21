@@ -21,6 +21,7 @@ open Microsoft.AspNetCore.Authentication
 open Microsoft.AspNetCore.Authentication.Cookies
 open Microsoft.AspNetCore.Authentication.JwtBearer
 open Microsoft.AspNetCore.Authentication.OpenIdConnect
+open Microsoft.AspNetCore.DataProtection
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.DependencyInjection
 open Microsoft.IdentityModel.Tokens
@@ -42,6 +43,19 @@ let mcpScopes = [ "mcp"; "recipes:read"; "recipes:write"; "shopping:read"; "shop
 
 let configure (services: IServiceCollection) (config: Config) =
     let metadata = $"{config.KeycloakMetadataUrl}/.well-known/openid-configuration"
+
+    // The cookie is encrypted with the Data Protection key ring. By default
+    // that lives inside the container and is re-created on every deploy,
+    // which invalidates every session at once. Prod keeps it on the data
+    // volume instead (unencrypted at rest, like the database next to it).
+    match config.DataProtectionKeysDir with
+    | Some dir ->
+        services
+            .AddDataProtection()
+            .SetApplicationName("plaintextpantry")
+            .PersistKeysToFileSystem(IO.DirectoryInfo dir)
+        |> ignore
+    | None -> ()
 
     services
         .AddAuthentication(fun o ->

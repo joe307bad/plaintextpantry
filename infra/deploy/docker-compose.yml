@@ -143,6 +143,11 @@ services:
       # Public URL the browser uses; Caddy strips the prefix.
       POWERSYNC_URL: https://${DOMAIN}/powersync
       POWERSYNC_JWT_SECRET: ${POWERSYNC_JWT_SECRET}
+      DATA_PROTECTION_KEYS_DIR: /keys
+    volumes:
+      # Session-cookie keys. Without this they'd be inside the container and
+      # every deploy would sign everyone out.
+      - /data/server/keys:/keys
 
   web:
     image: ${ECR_REGISTRY}/plaintextpantry/web:${IMAGE_TAG}
