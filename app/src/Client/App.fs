@@ -968,7 +968,7 @@ let private shoppingListPage (model: Model) dispatch =
                   [ // Phones: name left, button at the right edge. Desktop: both on the left.
                     prop.className "mb-3 flex items-center justify-between gap-3 md:justify-start"
                     prop.children
-                        [ Html.h2 [ prop.className "text-lg font-semibold"; prop.text list.name ]
+                        [ Html.h2 [ prop.className "min-w-0 truncate text-lg font-semibold"; prop.title list.name; prop.text list.name ]
                           Html.button
                               [ prop.type' "button"
                                 prop.className "border border-gray-300 px-3 py-1 text-gray-700 hover:bg-gray-50"
@@ -1106,9 +1106,11 @@ let private menuPage (model: Model) dispatch =
               Html.div
                   [ prop.className "mb-3 flex h-8 items-center justify-between gap-3 md:justify-start"
                     prop.children
-                        [ Html.h2 [ prop.className "text-lg font-semibold"; prop.text menu.name ]
+                        [ // One line, cut with an ellipsis: the name has two random
+                          // words on the end and the buttons keep their room.
+                          Html.h2 [ prop.className "min-w-0 truncate text-lg font-semibold"; prop.title menu.name; prop.text menu.name ]
                           Html.div
-                              [ prop.className "flex items-center gap-2"
+                              [ prop.className "flex shrink-0 items-center gap-2"
                                 prop.children
                                     [ Html.button
                                           [ prop.type' "button"
