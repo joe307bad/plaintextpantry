@@ -81,10 +81,12 @@ module private Api =
     /// `Some user` when the session cookie is valid, `None` on 401. When the
     /// request can't be made at all (offline), the last confirmed user: the
     /// cookie is still there, and local data is what the app runs on anyway.
+    /// `fetchUnsafe`: Fable.Fetch's `fetch` rejects on any non-2xx, which
+    /// would make a 401 look like being offline and keep a dead session alive.
     let getMe () =
         promise {
             let! response =
-                fetch Route.me [] |> Promise.map Some |> Promise.catch (fun _ -> None)
+                fetchUnsafe Route.me [] |> Promise.map Some |> Promise.catch (fun _ -> None)
 
             match response with
             | None -> return LastUser.get ()
