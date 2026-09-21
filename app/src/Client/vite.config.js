@@ -9,10 +9,12 @@ export default defineConfig({
     // Offline app shell. Production builds only: the service worker precaches
     // every file the app needs (bundle, workers, SQLite WASM, fonts, icons), so
     // once loaded it opens with no network; data was already local (PowerSync).
-    // A new deploy is picked up on the next launch (autoUpdate). The manifest
-    // is the hand-written public/manifest.webmanifest.
+    // A new deploy installs in the background and the app offers a reload.
+    // The manifest is the hand-written public/manifest.webmanifest.
     VitePWA({
-      registerType: 'autoUpdate',
+      // A new worker waits until the user taps "Reload" (see pwa.js).
+      registerType: 'prompt',
+      injectRegister: false,
       manifest: false,
       workbox: {
         globPatterns: ['**/*.{js,css,html,wasm,ttf,png,svg,webmanifest}'],

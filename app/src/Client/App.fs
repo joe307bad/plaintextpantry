@@ -63,6 +63,12 @@ type Archivable =
     | CurrentShoppingList
     | CurrentMenu
 
+/// Registers the service worker (pwa.js). `onNeedRefresh` is called when a
+/// new version has installed and is waiting, with the function that
+/// switches to it and reloads.
+[<Import("register", "./pwa.js")>]
+let private registerPwa (onNeedRefresh: (unit -> unit) -> unit) : unit = jsNative
+
 /// Who is signed in. Data only starts syncing once we know.
 type Session =
     | Checking
@@ -104,6 +110,9 @@ type Model =
       NewItem: string
       /// The mobile bottom-sheet menu, toggled by the logo button.
       MenuOpen: bool
+      /// Set once a new version is installed and waiting; calling it reloads
+      /// into it. Shown as a bar that stays until tapped.
+      Update: (unit -> unit) option
       Toast: Toast option }
 
 type Msg =
@@ -149,6 +158,7 @@ type Msg =
     | CancelDelete
     | DeleteRecipe of id: string
     | ToggleMenu
+    | UpdateAvailable of reload: (unit -> unit)
     /// Starts the exit animation...
     | HideToast of seq: int
     /// ...and, once it has played, unmounts.
@@ -201,9 +211,11 @@ let init () =
       PendingShoppingAdd = None
       NewItem = ""
       MenuOpen = false
+      Update = None
       Toast = None },
     Cmd.batch
         [ Cmd.ofEffect (fun dispatch -> Router.onUrlChanged (UrlChanged >> dispatch))
+          Cmd.ofEffect (fun dispatch -> registerPwa (UpdateAvailable >> dispatch))
           Cmd.OfPromise.either Db.currentUser () SessionChecked (fun err ->
               console.error err
               SessionChecked None) ]
@@ -486,6 +498,7 @@ let update msg model =
                 model.MenuSides |> List.filter (fun s -> not (gone.Contains s.menu_recipe_id)) },
         fireAndForget (Db.deleteRecipe id)
     | ToggleMenu -> { model with MenuOpen = not model.MenuOpen }, Cmd.none
+    | UpdateAvailable reload -> { model with Update = Some reload }, Cmd.none
     | HideToast seq ->
         match model.Toast with
         | Some t when t.Seq = seq -> { model with Toast = Some { t with Leaving = true } }, after toastAnimationMs (RemoveToast seq)
@@ -1222,19 +1235,38 @@ let View () =
                   | Some menu -> confirmArchiveModal CurrentMenu menu.name dispatch
                   | None -> Html.none
               | None -> Html.none
-              match model.Toast with
-              | Some t ->
-                  // Keyed by sequence so a new toast re-runs the animation.
-                  // Sits above the phone's bottom row (menu button, "Created").
-                  Html.div
-                      [ prop.key t.Seq
-                        prop.className (
-                            (if t.Leaving then "toast-out" else "toast-in")
-                            + " pointer-events-none fixed bottom-safe-16 left-1/2 z-50 -translate-x-1/2 bg-ink px-3 py-2 text-sm text-white shadow-lg md:bottom-6"
-                        )
-                        prop.role "status"
-                        prop.text t.Text ]
-              | None -> Html.none ]
+              // Bottom centre, above the phone's bottom row (menu button,
+              // "Created"): the update bar, if any, over the passing toast.
+              Html.div
+                  [ prop.className
+                        "pointer-events-none fixed bottom-safe-16 left-1/2 z-50 flex -translate-x-1/2 flex-col items-center gap-2 md:bottom-6"
+                    prop.children
+                        [ match model.Update with
+                          | Some reload ->
+                              Html.div
+                                  [ prop.className
+                                        "toast-in pointer-events-auto flex items-center gap-3 bg-ink px-3 py-2 text-sm text-white shadow-lg"
+                                    prop.role "status"
+                                    prop.children
+                                        [ Html.span [ prop.text "Update available" ]
+                                          Html.button
+                                              [ prop.type' "button"
+                                                prop.className "font-semibold text-brand"
+                                                prop.text "Reload"
+                                                prop.onClick (fun _ -> reload ()) ] ] ]
+                          | None -> Html.none
+                          match model.Toast with
+                          | Some t ->
+                              // Keyed by sequence so a new toast re-runs the animation.
+                              Html.div
+                                  [ prop.key t.Seq
+                                    prop.className (
+                                        (if t.Leaving then "toast-out" else "toast-in")
+                                        + " bg-ink px-3 py-2 text-sm text-white shadow-lg"
+                                    )
+                                    prop.role "status"
+                                    prop.text t.Text ]
+                          | None -> Html.none ] ] ]
 
 let root = ReactDOM.createRoot (document.getElementById "root")
 root.render (View())
