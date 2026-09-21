@@ -8,6 +8,7 @@
     <Compile Include="Db.fs" />
     <Compile Include="CodeMirror.fs" />
     <Compile Include="CooklangEditor.fs" />
+    <Compile Include="Print.fs" />
     <Compile Include="App.fs" />
   </ItemGroup>
   <ItemGroup>

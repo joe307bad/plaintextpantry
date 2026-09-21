@@ -39,7 +39,8 @@ let mcpScheme = "McpBearer"
 
 /// What an MCP client may ask for. Must be client scopes that exist on the
 /// realm (infra/keycloak/provision.sh creates exactly these).
-let mcpScopes = [ "mcp"; "recipes:read"; "recipes:write"; "shopping:read"; "shopping:write" ]
+let mcpScopes =
+    [ "mcp"; "recipes:read"; "recipes:write"; "shopping:read"; "shopping:write"; "menus:read"; "menus:write" ]
 
 let configure (services: IServiceCollection) (config: Config) =
     let metadata = $"{config.KeycloakMetadataUrl}/.well-known/openid-configuration"

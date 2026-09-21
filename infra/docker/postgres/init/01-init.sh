@@ -20,13 +20,14 @@ CREATE TABLE recipes (
     created_at  timestamptz NOT NULL DEFAULT now()
 );
 
--- Just a name for now; the app adds to the user's newest list and makes
--- one when they have none.
+-- The app adds to the user's newest un-archived list and makes one when
+-- they have none; archiving the current list is how a new one starts.
 CREATE TABLE shopping_lists (
     id          uuid PRIMARY KEY,
     user_id     text NOT NULL,
     name        text NOT NULL,
-    created_at  timestamptz NOT NULL DEFAULT now()
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    archived_at timestamptz
 );
 
 -- One row per ingredient line; `quantity` is text so "some" / "few" survive.
@@ -49,7 +50,8 @@ CREATE TABLE menus (
     id          uuid PRIMARY KEY,
     user_id     text NOT NULL,
     name        text NOT NULL,
-    created_at  timestamptz NOT NULL DEFAULT now()
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    archived_at timestamptz
 );
 
 CREATE TABLE menu_recipes (
@@ -60,6 +62,18 @@ CREATE TABLE menu_recipes (
     created_at  timestamptz NOT NULL DEFAULT now()
 );
 
+-- A side dish noted under a menu entry ("rice" under the curry). `done`
+-- is checked off from the shopping list, which shows the current menu's
+-- sides beneath its own items.
+CREATE TABLE menu_sides (
+    id              uuid PRIMARY KEY,
+    user_id         text NOT NULL,
+    menu_recipe_id  uuid NOT NULL,
+    name            text NOT NULL,
+    done            integer NOT NULL DEFAULT 0,
+    created_at      timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE INDEX recipes_user_id ON recipes (user_id);
 CREATE INDEX shopping_lists_user_id ON shopping_lists (user_id);
 CREATE INDEX shopping_items_user_id ON shopping_items (user_id);
@@ -67,6 +81,8 @@ CREATE INDEX shopping_items_list_id ON shopping_items (list_id);
 CREATE INDEX menus_user_id ON menus (user_id);
 CREATE INDEX menu_recipes_user_id ON menu_recipes (user_id);
 CREATE INDEX menu_recipes_menu_id ON menu_recipes (menu_id);
+CREATE INDEX menu_sides_user_id ON menu_sides (user_id);
+CREATE INDEX menu_sides_menu_recipe_id ON menu_sides (menu_recipe_id);
 
 CREATE PUBLICATION powersync FOR ALL TABLES;
 SQL

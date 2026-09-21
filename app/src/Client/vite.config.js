@@ -1,9 +1,34 @@
 import { defineConfig } from 'vite';
 import tailwindcss from '@tailwindcss/vite';
+import { VitePWA } from 'vite-plugin-pwa';
 
 // Build tooling only - the app itself is F# compiled by Fable into ./fable-out.
 export default defineConfig({
-  plugins: [tailwindcss()],
+  plugins: [
+    tailwindcss(),
+    // Offline app shell. Production builds only: the service worker precaches
+    // every file the app needs (bundle, workers, SQLite WASM, fonts, icons), so
+    // once loaded it opens with no network; data was already local (PowerSync).
+    // A new deploy is picked up on the next launch (autoUpdate). The manifest
+    // is the hand-written public/manifest.webmanifest.
+    VitePWA({
+      registerType: 'autoUpdate',
+      manifest: false,
+      workbox: {
+        globPatterns: ['**/*.{js,css,html,wasm,ttf,png,svg,webmanifest}'],
+        // The multiple-ciphers SQLite builds are only loaded with an
+        // encryptionKey, which we don't use; og.png is for link previews.
+        globIgnores: ['**/mc-wa-sqlite*', '**/og.png'],
+        // The SQLite WASM is 2.2 MB; workbox's default cap is 2 MiB.
+        maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
+        // Any in-app route is the SPA. Everything the F# server or PowerSync
+        // answers (including the OIDC login/callback navigations) is not.
+        navigateFallback: '/index.html',
+        navigateFallbackDenylist: [/^\/api\//, /^\/mcp/, /^\/powersync\//, /^\/\.well-known\//],
+        cleanupOutdatedCaches: true,
+      },
+    }),
+  ],
   optimizeDeps: {
     // Contains web workers and WASM; must not be pre-bundled.
     exclude: ['@powersync/web'],

@@ -23,3 +23,6 @@ streams:
   menu_recipes:
     auto_subscribe: true
     query: SELECT * FROM menu_recipes WHERE user_id = auth.user_id()
+  menu_sides:
+    auto_subscribe: true
+    query: SELECT * FROM menu_sides WHERE user_id = auth.user_id()

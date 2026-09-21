@@ -48,6 +48,48 @@
   }
 }
 
+/* Installed to a home screen (display: standalone) the page extends under
+   the iPhone home indicator. These keep the bottom-anchored controls above
+   it; in a normal browser tab the inset is 0 and they are plain bottom-4 etc. */
+@utility bottom-safe-4 {
+  bottom: calc(--spacing(4) + env(safe-area-inset-bottom, 0px));
+}
+@utility bottom-safe-16 {
+  bottom: calc(--spacing(16) + env(safe-area-inset-bottom, 0px));
+}
+@utility pb-safe-4 {
+  padding-bottom: calc(--spacing(4) + env(safe-area-inset-bottom, 0px));
+}
+@utility pb-safe-16 {
+  padding-bottom: calc(--spacing(16) + env(safe-area-inset-bottom, 0px));
+}
+
+@layer components {
+  /* Desktop nav links: a hidden, zero-height bold copy of the label sets the
+     width, so the active link turning bold doesn't nudge its neighbours. */
+  .nav-link {
+    display: inline-flex;
+    flex-direction: column;
+  }
+  .nav-link::after {
+    content: attr(data-text);
+    font-weight: 600;
+    height: 0;
+    overflow: hidden;
+    visibility: hidden;
+    pointer-events: none;
+  }
+  /* The small glyph buttons (×, +). 4% is invisible on a glyph this size,
+     so they sink further and faster on press, then ease back up. */
+  .icon-btn {
+    transition-duration: 150ms;
+  }
+  .icon-btn:active:not(:disabled) {
+    transform: scale(0.8) translateY(1px);
+    transition-duration: 50ms;
+  }
+}
+
 /* Mobile menu: the sheet slides up and the backdrop fades, fast enough to
    read as immediate but with enough motion to show where it came from. */
 @keyframes sheet-in {
@@ -60,6 +102,20 @@
 }
 .sheet-in { animation: sheet-in 150ms ease-out; }
 .fade-in { animation: fade-in 150ms ease-out; }
+
+/* Toast: rises a touch as it fades in. Only `transform` here; the
+   horizontal centring is Tailwind's `translate` property, kept separate. */
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes toast-out {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(6px); }
+}
+.toast-in { animation: toast-in 150ms ease-out; }
+/* `forwards` holds the faded-out state until the element is removed. */
+.toast-out { animation: toast-out 150ms ease-in forwards; }
 
 /* Cooklang editor (CodeMirror). Token classes come from CooklangEditor.fs. */
 .cm-editor { min-height: 12rem; padding: 0.25rem 0.5rem; }

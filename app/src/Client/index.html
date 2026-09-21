@@ -2,8 +2,19 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- viewport-fit=cover: when installed to a home screen the page runs
+         under the iPhone home indicator; index.css pads the bottom row by
+         env(safe-area-inset-bottom). -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Plaintext Pantry</title>
+    <!-- Installable as a home-screen app. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#ffffff" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Pantry" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <link rel="apple-touch-icon" href="/brand/apple-touch-icon.png" />
     <meta name="description" content="Local-first, open source, free, minimalist recipe and grocery list manager" />
     <!-- Link previews. One card for every route (this file serves them all); the
          image is public/brand/og.png, the wordmark and tagline at 2400x1260. -->

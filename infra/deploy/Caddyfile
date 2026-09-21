@@ -39,6 +39,12 @@
 
     handle {
         root * /srv
+        # Hashed bundles never change; everything else (index.html, the service
+        # worker, manifest, brand files) is revalidated so deploys show up.
+        @immutable path /assets/*
+        header @immutable Cache-Control "public, max-age=31536000, immutable"
+        @volatile not path /assets/*
+        header @volatile Cache-Control "no-cache"
         try_files {path} /index.html
         file_server
     }

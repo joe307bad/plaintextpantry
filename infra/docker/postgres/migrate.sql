@@ -49,3 +49,19 @@ CREATE TABLE IF NOT EXISTS menu_recipes (
 CREATE INDEX IF NOT EXISTS menus_user_id        ON menus (user_id);
 CREATE INDEX IF NOT EXISTS menu_recipes_user_id ON menu_recipes (user_id);
 CREATE INDEX IF NOT EXISTS menu_recipes_menu_id ON menu_recipes (menu_id);
+
+-- Sides under menu entries.
+CREATE TABLE IF NOT EXISTS menu_sides (
+    id              uuid PRIMARY KEY,
+    user_id         text NOT NULL,
+    menu_recipe_id  uuid NOT NULL,
+    name            text NOT NULL,
+    done            integer NOT NULL DEFAULT 0,
+    created_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS menu_sides_user_id        ON menu_sides (user_id);
+CREATE INDEX IF NOT EXISTS menu_sides_menu_recipe_id ON menu_sides (menu_recipe_id);
+
+-- Archiving: the current list/menu is the newest with archived_at NULL.
+ALTER TABLE shopping_lists ADD COLUMN IF NOT EXISTS archived_at timestamptz;
+ALTER TABLE menus          ADD COLUMN IF NOT EXISTS archived_at timestamptz;

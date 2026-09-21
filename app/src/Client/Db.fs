@@ -14,7 +14,8 @@ open PowerSync
 /// Row shape of the local `recipes` table. Field names match SQLite columns.
 type Recipe = { id: string; title: string; body: string; created_at: string }
 
-/// Row shape of the local `shopping_lists` table. Only a name for now.
+/// Row shape of the local `shopping_lists` table. Archived lists are kept
+/// but never shown; the watch query leaves them out, so a row here is live.
 type ShoppingList = { id: string; name: string; created_at: string }
 
 /// Row shape of the local `shopping_items` table. `quantity` is text so "some" survives; `done` is 0/1.
@@ -38,6 +39,15 @@ type MenuRecipe =
       recipe_id: string
       created_at: string }
 
+/// Row shape of the local `menu_sides` table: a side dish under a menu
+/// entry. `done` is 0/1, checked off from the shopping list.
+type MenuSide =
+    { id: string
+      menu_recipe_id: string
+      name: string
+      ``done``: int
+      created_at: string }
+
 /// Calls to the F# server, using the coders shared with it.
 module private Api =
     let private ensureOk (response: Response) =
@@ -49,21 +59,50 @@ module private Api =
                 return failwithf "%s %d: %s" response.Url response.Status body
         }
 
-    /// `Some user` when the session cookie is valid, `None` on 401.
+    /// The last user /me confirmed, kept so the app can open with no
+    /// network. Cleared on 401 and on sign-out.
+    module private LastUser =
+        let private key = "ptp.user"
+
+        let get () =
+            match Browser.WebStorage.localStorage.getItem key with
+            | null -> None
+            | json ->
+                match Decode.fromString Codec.decodeUser json with
+                | Ok user -> Some user
+                | Error _ -> None
+
+        let set (user: User) =
+            Browser.WebStorage.localStorage.setItem (key, Encode.toString 0 (Codec.encodeUser user))
+
+        let clear () =
+            Browser.WebStorage.localStorage.removeItem key
+
+    /// `Some user` when the session cookie is valid, `None` on 401. When the
+    /// request can't be made at all (offline), the last confirmed user: the
+    /// cookie is still there, and local data is what the app runs on anyway.
     let getMe () =
         promise {
-            let! response = fetch Route.me []
+            let! response =
+                fetch Route.me [] |> Promise.map Some |> Promise.catch (fun _ -> None)
 
-            if response.Status = 401 then
+            match response with
+            | None -> return LastUser.get ()
+            | Some response when response.Status = 401 ->
+                LastUser.clear ()
                 return None
-            else
+            | Some response ->
                 let! response = ensureOk response
                 let! body = response.text ()
 
                 match Decode.fromString Codec.decodeUser body with
-                | Ok user -> return Some user
+                | Ok user ->
+                    LastUser.set user
+                    return Some user
                 | Error err -> return failwithf "Bad /me response: %s" err
         }
+
+    let forgetMe () = LastUser.clear ()
 
     let getSyncCredentials () =
         promise {
@@ -91,7 +130,7 @@ let db =
     database
         "plaintextpantry.sqlite"
         [ "recipes", [ "title", column.text; "body", column.text; "created_at", column.text ]
-          "shopping_lists", [ "name", column.text; "created_at", column.text ]
+          "shopping_lists", [ "name", column.text; "created_at", column.text; "archived_at", column.text ]
           "shopping_items",
           [ "list_id", column.text
             "name", column.text
@@ -99,8 +138,13 @@ let db =
             "unit", column.text
             "done", column.integer
             "created_at", column.text ]
-          "menus", [ "name", column.text; "created_at", column.text ]
-          "menu_recipes", [ "menu_id", column.text; "recipe_id", column.text; "created_at", column.text ] ]
+          "menus", [ "name", column.text; "created_at", column.text; "archived_at", column.text ]
+          "menu_recipes", [ "menu_id", column.text; "recipe_id", column.text; "created_at", column.text ]
+          "menu_sides",
+          [ "menu_recipe_id", column.text
+            "name", column.text
+            "done", column.integer
+            "created_at", column.text ] ]
 
 let private toCrudOp (entry: CrudEntry) : CrudOp =
     let data =
@@ -150,6 +194,7 @@ let currentUser () = Api.getMe ()
 /// cookie and ends the Keycloak session.
 let signOut () =
     promise {
+        Api.forgetMe ()
         do! db.disconnectAndClear ()
         Browser.Dom.window.location.href <- Route.logout
     }
@@ -171,9 +216,10 @@ let watchRecipes (onChange: Recipe list -> unit) =
             member _.onError(err) = JS.console.error ("watch recipes", err) }
     |> ignore
 
-/// Live shopping lists, newest first. The head is the one adding goes into.
+/// Live un-archived shopping lists, newest first. The head is the one
+/// adding goes into.
 let watchShoppingLists (onChange: ShoppingList list -> unit) =
-    let sql = "SELECT id, name, created_at FROM shopping_lists ORDER BY created_at DESC, id"
+    let sql = "SELECT id, name, created_at FROM shopping_lists WHERE archived_at IS NULL ORDER BY created_at DESC, id"
     let query = db.query<ShoppingList> {| sql = sql; parameters = [||] |}
 
     query.watch().registerListener
@@ -196,9 +242,9 @@ let watchShoppingItems (onChange: ShoppingItem list -> unit) =
             member _.onError(err) = JS.console.error ("watch shopping items", err) }
     |> ignore
 
-/// Live menus, newest first. The head is the one adding goes into.
+/// Live un-archived menus, newest first. The head is the one adding goes into.
 let watchMenus (onChange: Menu list -> unit) =
-    let sql = "SELECT id, name, created_at FROM menus ORDER BY created_at DESC, id"
+    let sql = "SELECT id, name, created_at FROM menus WHERE archived_at IS NULL ORDER BY created_at DESC, id"
     let query = db.query<Menu> {| sql = sql; parameters = [||] |}
 
     query.watch().registerListener
@@ -240,10 +286,17 @@ let addRecipe (recipe: Recipe) =
 let updateRecipe (id: string) (title: string) (body: string) =
     db.execute ("UPDATE recipes SET title = ?, body = ? WHERE id = ?", [| title; body; id |])
 
-/// Also takes the recipe off every menu it was on.
+/// Also takes the recipe, and the sides under it, off every menu it was on.
 let deleteRecipe (id: string) =
     promise {
         let! _ = db.execute ("DELETE FROM recipes WHERE id = ?", [| id |])
+
+        let! _ =
+            db.execute (
+                "DELETE FROM menu_sides WHERE menu_recipe_id IN (SELECT id FROM menu_recipes WHERE recipe_id = ?)",
+                [| id |]
+            )
+
         let! _ = db.execute ("DELETE FROM menu_recipes WHERE recipe_id = ?", [| id |])
         ()
     }
@@ -381,8 +434,9 @@ let addToShoppingList (plan: ShoppingPlan) =
 let setShoppingItemDone (id: string) (isDone: bool) =
     db.execute ("UPDATE shopping_items SET done = ? WHERE id = ?", [| (if isDone then 1 else 0); id |])
 
-let clearDoneShoppingItems (listId: string) =
-    db.execute ("DELETE FROM shopping_items WHERE list_id = ? AND done <> 0", [| listId |])
+/// Puts the list away; its items stay with it. The next add starts a new one.
+let archiveShoppingList (id: string) =
+    db.execute ("UPDATE shopping_lists SET archived_at = ? WHERE id = ?", [| nowIso (); id |])
 
 // ---------------------------------------------------------------------------
 // Menus
@@ -444,5 +498,46 @@ let addToMenu (plan: MenuPlan) =
         ()
     }
 
+/// Takes the entry and its sides off the menu.
 let removeMenuRecipe (id: string) =
-    db.execute ("DELETE FROM menu_recipes WHERE id = ?", [| id |])
+    promise {
+        let! _ = db.execute ("DELETE FROM menu_sides WHERE menu_recipe_id = ?", [| id |])
+        let! _ = db.execute ("DELETE FROM menu_recipes WHERE id = ?", [| id |])
+        ()
+    }
+
+/// Live sides across every menu, in the order they were added.
+let watchMenuSides (onChange: MenuSide list -> unit) =
+    let sql = "SELECT id, menu_recipe_id, name, done, created_at FROM menu_sides ORDER BY created_at, id"
+    let query = db.query<MenuSide> {| sql = sql; parameters = [||] |}
+
+    query.watch().registerListener
+        { new WatchedQueryListener<MenuSide> with
+            member _.onData(rows) = onChange (List.ofArray rows)
+            member _.onError(err) = JS.console.error ("watch menu sides", err) }
+    |> ignore
+
+/// The row a new side becomes; built by the caller so the UI can show it
+/// before the insert lands.
+let newMenuSide (menuRecipeId: string) (name: string) : MenuSide =
+    { id = string (Guid.NewGuid())
+      menu_recipe_id = menuRecipeId
+      name = name.Trim()
+      ``done`` = 0
+      created_at = nowIso () }
+
+let addMenuSide (side: MenuSide) =
+    db.execute (
+        "INSERT INTO menu_sides (id, menu_recipe_id, name, done, created_at) VALUES (?, ?, ?, 0, ?)",
+        [| side.id; side.menu_recipe_id; side.name; side.created_at |]
+    )
+
+let setMenuSideDone (id: string) (isDone: bool) =
+    db.execute ("UPDATE menu_sides SET done = ? WHERE id = ?", [| (if isDone then 1 else 0); id |])
+
+let removeMenuSide (id: string) =
+    db.execute ("DELETE FROM menu_sides WHERE id = ?", [| id |])
+
+/// Puts the menu away; its entries and sides stay with it.
+let archiveMenu (id: string) =
+    db.execute ("UPDATE menus SET archived_at = ? WHERE id = ?", [| nowIso (); id |])

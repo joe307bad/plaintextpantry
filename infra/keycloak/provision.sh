@@ -100,13 +100,15 @@ done
 # --- client scopes (what an MCP client asks for, what a token carries) ---------
 
 # (No associative arrays: macOS ships bash 3.2.)
-SCOPES="recipes:read recipes:write shopping:read shopping:write mcp"
+SCOPES="recipes:read recipes:write shopping:read shopping:write menus:read menus:write mcp"
 scope_text() {
   case "$1" in
     recipes:read)   echo "Read your recipes" ;;
     recipes:write)  echo "Create, edit and delete your recipes" ;;
     shopping:read)  echo "Read your shopping list" ;;
-    shopping:write) echo "Add to and check off your shopping list" ;;
+    shopping:write) echo "Add to, check off and archive your shopping list" ;;
+    menus:read)     echo "Read your menu" ;;
+    menus:write)    echo "Add recipes and sides to your menu, and archive it" ;;
     mcp)            echo "Use Plaintext Pantry from an AI assistant" ;;
   esac
 }

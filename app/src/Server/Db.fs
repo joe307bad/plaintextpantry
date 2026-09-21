@@ -14,7 +14,7 @@ open Shared
 let private tables =
     Map
         [ "recipes", [ "title", "text"; "body", "text"; "created_at", "timestamptz" ]
-          "shopping_lists", [ "name", "text"; "created_at", "timestamptz" ]
+          "shopping_lists", [ "name", "text"; "created_at", "timestamptz"; "archived_at", "timestamptz" ]
           "shopping_items",
           [ "list_id", "uuid"
             "name", "text"
@@ -22,8 +22,10 @@ let private tables =
             "unit", "text"
             "done", "integer"
             "created_at", "timestamptz" ]
-          "menus", [ "name", "text"; "created_at", "timestamptz" ]
-          "menu_recipes", [ "menu_id", "uuid"; "recipe_id", "uuid"; "created_at", "timestamptz" ] ]
+          "menus", [ "name", "text"; "created_at", "timestamptz"; "archived_at", "timestamptz" ]
+          "menu_recipes", [ "menu_id", "uuid"; "recipe_id", "uuid"; "created_at", "timestamptz" ]
+          "menu_sides",
+          [ "menu_recipe_id", "uuid"; "name", "text"; "done", "integer"; "created_at", "timestamptz" ] ]
 
 let private param (cmd: NpgsqlCommand) (name: string) (value: string option) =
     let v : obj =
@@ -220,7 +222,7 @@ let updateRecipe cs (userId: string) (id: Guid) (title: string option) (body: st
             return n = 1
         })
 
-/// Also drops the recipe from any menu it was on.
+/// Also drops the recipe, and the sides under it, from any menu it was on.
 let deleteRecipe cs (userId: string) (id: Guid) =
     withConn cs (fun conn ->
         task {
@@ -228,16 +230,24 @@ let deleteRecipe cs (userId: string) (id: Guid) =
             let! n = cmd.ExecuteNonQueryAsync()
 
             if n = 1 then
-                use cmd =
+                use sides =
+                    command
+                        conn
+                        "DELETE FROM menu_sides WHERE user_id = @u AND menu_recipe_id IN (SELECT id FROM menu_recipes WHERE recipe_id = @id AND user_id = @u)"
+                        [ "id", id; "u", userId ]
+
+                let! _ = sides.ExecuteNonQueryAsync()
+
+                use entries =
                     command conn "DELETE FROM menu_recipes WHERE recipe_id = @id AND user_id = @u" [ "id", id; "u", userId ]
 
-                let! _ = cmd.ExecuteNonQueryAsync()
+                let! _ = entries.ExecuteNonQueryAsync()
                 ()
 
             return n = 1
         })
 
-/// The user's newest list: the one adding goes into.
+/// The user's newest un-archived list: the one adding goes into.
 let latestShoppingList cs (userId: string) =
     withConn cs (fun conn ->
         task {
@@ -245,7 +255,7 @@ let latestShoppingList cs (userId: string) =
                 readAll
                     (command
                         conn
-                        "SELECT id, name, created_at FROM shopping_lists WHERE user_id = @u ORDER BY created_at DESC, id LIMIT 1"
+                        "SELECT id, name, created_at FROM shopping_lists WHERE user_id = @u AND archived_at IS NULL ORDER BY created_at DESC, id LIMIT 1"
                         [ "u", userId ])
                     listOf
 
@@ -316,6 +326,203 @@ let deleteShoppingItem cs (userId: string) (id: Guid) =
     withConn cs (fun conn ->
         task {
             use cmd = command conn "DELETE FROM shopping_items WHERE id = @id AND user_id = @u" [ "id", id; "u", userId ]
+            let! n = cmd.ExecuteNonQueryAsync()
+            return n = 1
+        })
+
+/// Puts the list away. Returns false when it isn't the user's.
+let archiveShoppingList cs (userId: string) (id: Guid) =
+    withConn cs (fun conn ->
+        task {
+            use cmd =
+                command
+                    conn
+                    "UPDATE shopping_lists SET archived_at = now() WHERE id = @id AND user_id = @u AND archived_at IS NULL"
+                    [ "id", id; "u", userId ]
+
+            let! n = cmd.ExecuteNonQueryAsync()
+            return n = 1
+        })
+
+// ---------------------------------------------------------------------------
+// Menus
+// ---------------------------------------------------------------------------
+
+type MenuRow = { Id: Guid; Name: string; CreatedAt: DateTimeOffset }
+
+/// A menu entry joined to its recipe, so callers get the title in one go.
+type MenuRecipeRow =
+    { Id: Guid
+      RecipeId: Guid
+      Title: string
+      Body: string
+      CreatedAt: DateTimeOffset }
+
+type MenuSideRow =
+    { Id: Guid
+      MenuRecipeId: Guid
+      Name: string
+      Done: bool
+      CreatedAt: DateTimeOffset }
+
+let private menuOf (r: Data.Common.DbDataReader) : MenuRow =
+    { Id = r.GetGuid 0
+      Name = r.GetString 1
+      CreatedAt = r.GetFieldValue<DateTimeOffset> 2 }
+
+let private menuRecipeOf (r: Data.Common.DbDataReader) : MenuRecipeRow =
+    { Id = r.GetGuid 0
+      RecipeId = r.GetGuid 1
+      Title = r.GetString 2
+      Body = r.GetString 3
+      CreatedAt = r.GetFieldValue<DateTimeOffset> 4 }
+
+let private sideOf (r: Data.Common.DbDataReader) : MenuSideRow =
+    { Id = r.GetGuid 0
+      MenuRecipeId = r.GetGuid 1
+      Name = r.GetString 2
+      Done = r.GetInt32 3 <> 0
+      CreatedAt = r.GetFieldValue<DateTimeOffset> 4 }
+
+/// The user's newest un-archived menu: the one adding goes into.
+let latestMenu cs (userId: string) =
+    withConn cs (fun conn ->
+        task {
+            let! rows =
+                readAll
+                    (command
+                        conn
+                        "SELECT id, name, created_at FROM menus WHERE user_id = @u AND archived_at IS NULL ORDER BY created_at DESC, id LIMIT 1"
+                        [ "u", userId ])
+                    menuOf
+
+            return List.tryHead rows
+        })
+
+let insertMenu cs (userId: string) (name: string) =
+    withConn cs (fun conn ->
+        task {
+            let id = Guid.NewGuid()
+
+            use cmd =
+                command conn "INSERT INTO menus (id, user_id, name) VALUES (@id, @u, @n)" [ "id", id; "u", userId; "n", name ]
+
+            let! _ = cmd.ExecuteNonQueryAsync()
+            return id
+        })
+
+let archiveMenu cs (userId: string) (id: Guid) =
+    withConn cs (fun conn ->
+        task {
+            use cmd =
+                command
+                    conn
+                    "UPDATE menus SET archived_at = now() WHERE id = @id AND user_id = @u AND archived_at IS NULL"
+                    [ "id", id; "u", userId ]
+
+            let! n = cmd.ExecuteNonQueryAsync()
+            return n = 1
+        })
+
+/// A menu's entries in the order added. Entries whose recipe is gone are
+/// left out, as the UI does.
+let listMenuRecipes cs (userId: string) (menuId: Guid) =
+    withConn cs (fun conn ->
+        readAll
+            (command
+                conn
+                "SELECT e.id, e.recipe_id, r.title, r.body, e.created_at FROM menu_recipes e JOIN recipes r ON r.id = e.recipe_id AND r.user_id = e.user_id WHERE e.user_id = @u AND e.menu_id = @m ORDER BY e.created_at, e.id"
+                [ "u", userId; "m", menuId ])
+            menuRecipeOf)
+
+/// Adds the recipe to the menu; `None` when the recipe isn't the user's.
+let insertMenuRecipe cs (userId: string) (menuId: Guid) (recipeId: Guid) =
+    withConn cs (fun conn ->
+        task {
+            let id = Guid.NewGuid()
+
+            use cmd =
+                command
+                    conn
+                    "INSERT INTO menu_recipes (id, user_id, menu_id, recipe_id) SELECT @id, @u, @m, id FROM recipes WHERE id = @r AND user_id = @u"
+                    [ "id", id; "u", userId; "m", menuId; "r", recipeId ]
+
+            let! n = cmd.ExecuteNonQueryAsync()
+            return (if n = 1 then Some id else None)
+        })
+
+/// Takes the entry, and its sides, off the menu.
+let deleteMenuRecipe cs (userId: string) (id: Guid) =
+    withConn cs (fun conn ->
+        task {
+            use sides =
+                command conn "DELETE FROM menu_sides WHERE menu_recipe_id = @id AND user_id = @u" [ "id", id; "u", userId ]
+
+            let! _ = sides.ExecuteNonQueryAsync()
+            use cmd = command conn "DELETE FROM menu_recipes WHERE id = @id AND user_id = @u" [ "id", id; "u", userId ]
+            let! n = cmd.ExecuteNonQueryAsync()
+            return n = 1
+        })
+
+/// Every side on a menu, in the order added.
+let listMenuSides cs (userId: string) (menuId: Guid) =
+    withConn cs (fun conn ->
+        readAll
+            (command
+                conn
+                "SELECT s.id, s.menu_recipe_id, s.name, s.done, s.created_at FROM menu_sides s JOIN menu_recipes e ON e.id = s.menu_recipe_id WHERE s.user_id = @u AND e.menu_id = @m ORDER BY s.created_at, s.id"
+                [ "u", userId; "m", menuId ])
+            sideOf)
+
+/// Adds sides under a menu entry; `None` when the entry isn't the user's.
+let insertMenuSides cs (userId: string) (menuRecipeId: Guid) (names: string list) =
+    withConn cs (fun conn ->
+        task {
+            use owns =
+                command conn "SELECT 1 FROM menu_recipes WHERE id = @id AND user_id = @u" [ "id", menuRecipeId; "u", userId ]
+
+            let! found = owns.ExecuteScalarAsync()
+
+            if isNull found then
+                return None
+            else
+                use! tx = conn.BeginTransactionAsync()
+                let ids = ResizeArray()
+
+                for name in names do
+                    let id = Guid.NewGuid()
+
+                    use cmd =
+                        command
+                            conn
+                            "INSERT INTO menu_sides (id, user_id, menu_recipe_id, name) VALUES (@id, @u, @e, @n)"
+                            [ "id", id; "u", userId; "e", menuRecipeId; "n", name ]
+
+                    cmd.Transaction <- tx
+                    let! _ = cmd.ExecuteNonQueryAsync()
+                    ids.Add id
+
+                do! tx.CommitAsync()
+                return Some(List.ofSeq ids)
+        })
+
+let setMenuSideDone cs (userId: string) (id: Guid) (isDone: bool) =
+    withConn cs (fun conn ->
+        task {
+            use cmd =
+                command
+                    conn
+                    "UPDATE menu_sides SET done = @d WHERE id = @id AND user_id = @u"
+                    [ "id", id; "u", userId; "d", (if isDone then 1 else 0) ]
+
+            let! n = cmd.ExecuteNonQueryAsync()
+            return n = 1
+        })
+
+let deleteMenuSide cs (userId: string) (id: Guid) =
+    withConn cs (fun conn ->
+        task {
+            use cmd = command conn "DELETE FROM menu_sides WHERE id = @id AND user_id = @u" [ "id", id; "u", userId ]
             let! n = cmd.ExecuteNonQueryAsync()
             return n = 1
         })

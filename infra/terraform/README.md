@@ -96,7 +96,8 @@ Add a custom connector in Claude with the URL `https://plaintextpantry.com/mcp`.
 Claude reads `/.well-known/oauth-protected-resource/mcp`, registers itself
 with Keycloak (anonymous dynamic client registration is open to `claude.ai`),
 sends you through Google, and shows a consent screen listing the scopes
-(`recipes:read`, `recipes:write`, `shopping:read`, `shopping:write`). The
+(`recipes:read`, `recipes:write`, `shopping:read`, `shopping:write`,
+`menus:read`, `menus:write`). The
 tools then act as your account only. Locally the same works against
 `http://localhost:5050/mcp` with the dev user.
 
