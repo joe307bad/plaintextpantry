@@ -24,3 +24,17 @@ let ``age counts calendar days`` (daysAgo: int, expected: string) =
 let ``a clock skewed into the future still reads today`` () =
     let today = DateTime(2026, 9, 19)
     Assert.Equal("today", Created.age today (today.AddDays 1.0))
+
+[<Fact>]
+let ``editing past the quantity and unit keeps them`` () =
+    Assert.Equal(("2", "cups", "bread flour"), ShoppingItem.edit "2" "cups" "2 cups bread flour")
+    Assert.Equal(("2", "", "eggs"), ShoppingItem.edit "2" "" " 2 eggs ")
+
+[<Fact>]
+let ``editing the quantity or unit takes the whole line as the name`` () =
+    Assert.Equal(("", "", "3 cups flour"), ShoppingItem.edit "2" "cups" "3 cups flour")
+    Assert.Equal(("", "", "2 cups"), ShoppingItem.edit "2" "cups" "2 cups")
+
+[<Fact>]
+let ``editing a plain item is just a rename`` () =
+    Assert.Equal(("", "", "oat milk"), ShoppingItem.edit "" "" "oat milk")

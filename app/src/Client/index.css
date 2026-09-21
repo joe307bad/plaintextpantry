@@ -69,6 +69,11 @@
 @utility pb-safe-16 {
   padding-bottom: calc(--spacing(16) + env(safe-area-inset-bottom, 0px));
 }
+/* Likewise at the top: installed, the page runs up under the status bar
+   (clock, signal), so the first line needs its height added. */
+@utility pt-safe-* {
+  padding-top: calc(--spacing(--value(integer)) + env(safe-area-inset-top, 0px));
+}
 
 @layer components {
   /* Desktop nav links: a hidden, zero-height bold copy of the label sets the
@@ -93,6 +98,12 @@
   .icon-btn:active:not(:disabled) {
     transform: scale(0.8) translateY(1px);
     transition-duration: 50ms;
+  }
+  /* Shopping-list rows: a long press edits, so iOS mustn't answer it with
+     the copy/look-up callout (select-none in the markup stops selection). */
+  .press-row {
+    -webkit-touch-callout: none;
+    touch-action: manipulation;
   }
 }
 

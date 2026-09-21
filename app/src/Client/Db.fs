@@ -436,6 +436,9 @@ let addToShoppingList (plan: ShoppingPlan) =
 let setShoppingItemDone (id: string) (isDone: bool) =
     db.execute ("UPDATE shopping_items SET done = ? WHERE id = ?", [| (if isDone then 1 else 0); id |])
 
+let updateShoppingItem (id: string) (name: string) (quantity: string) (unit: string) =
+    db.execute ("UPDATE shopping_items SET name = ?, quantity = ?, unit = ? WHERE id = ?", [| name; quantity; unit; id |])
+
 /// Puts the list away; its items stay with it. The next add starts a new one.
 let archiveShoppingList (id: string) =
     db.execute ("UPDATE shopping_lists SET archived_at = ? WHERE id = ?", [| nowIso (); id |])

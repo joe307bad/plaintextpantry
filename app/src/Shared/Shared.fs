@@ -25,6 +25,24 @@ module Created =
 module ShoppingList =
     let defaultName (date: DateTime) = sprintf "SL-%02d%02d" date.Month date.Day
 
+/// A shopping-list row is shown as one line, "2 cups flour", but stored as
+/// quantity, unit and name so a recipe's ingredients can be matched by name.
+module ShoppingItem =
+    let text (quantity: string) (unit: string) (name: string) =
+        [ quantity; unit; name ] |> List.filter ((<>) "") |> String.concat " "
+
+    /// The parts an edit of that line stands for. When the "2 cups " is left
+    /// alone the quantity and unit stay and only the name changes; when it
+    /// is touched the whole line becomes the name, like an item typed in.
+    let edit (quantity: string) (unit: string) (edited: string) =
+        let edited = edited.Trim()
+        let prefix = text quantity unit ""
+
+        if prefix <> "" && edited.StartsWith(prefix + " ") then
+            quantity, unit, edited.Substring(prefix.Length).Trim()
+        else
+            "", "", edited
+
 /// A menu is a shopping list's twin for recipes: a name, and the recipes
 /// added to it. Adding goes into the newest one, created on first use and
 /// named after today plus two random words ("M-0920-silly-fiddle") so two

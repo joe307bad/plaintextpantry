@@ -4,6 +4,7 @@ open System
 open Browser.Dom
 open Elmish
 open Fable.Core
+open Fable.Core.JsInterop
 open Feliz
 open Feliz.UseElmish
 open Db
@@ -69,6 +70,22 @@ type Archivable =
 [<Import("register", "./pwa.js")>]
 let private registerPwa (onNeedRefresh: (unit -> unit) -> unit) : unit = jsNative
 
+/// iOS keeps a native undo stack of everything typed into the page, and a
+/// shake offers to undo it ("Undo Typing?") - long after the field was
+/// committed and blanked, and even from being carried round a shop. No web
+/// API clears that stack, but WebKit clears the whole page's whenever any
+/// frame closes its document (FrameLoader::closeURL ->
+/// Editor::clearUndoRedoOperations -> WebPageProxy::clearAllEditCommands ->
+/// NSUndoManager removeAllActions), and detaching an iframe does just that.
+/// So: a throwaway iframe. Harmless elsewhere; run once typing is committed.
+let private forgetTyping =
+    Cmd.ofEffect (fun _ ->
+        let frame = document.createElement "iframe"
+        frame.setAttribute ("hidden", "")
+        frame.setAttribute ("aria-hidden", "true")
+        document.body.appendChild frame |> ignore
+        frame.remove ())
+
 /// Who is signed in. Data only starts syncing once we know.
 type Session =
     | Checking
@@ -108,6 +125,9 @@ type Model =
       PendingShoppingAdd: string option
       /// The blank row at the end of the shopping list.
       NewItem: string
+      /// The shopping-list row being edited in place (after a long press),
+      /// and its text as typed so far.
+      EditingItem: (string * string) option
       /// The mobile bottom-sheet menu, toggled by the logo button.
       MenuOpen: bool
       /// Set once a new version is installed and waiting; calling it reloads
@@ -143,6 +163,10 @@ type Msg =
     | NewItemChanged of string
     | AddNewItem
     | SetShoppingItemDone of id: string * isDone: bool
+    | StartEditItem of id: string
+    | EditItemChanged of string
+    | SaveEditItem
+    | CancelEditItem
     | ConfirmArchive of Archivable
     | CancelArchive
     | Archive of Archivable
@@ -209,6 +233,7 @@ let init () =
       PendingMenuRemove = None
       PendingArchive = None
       PendingShoppingAdd = None
+      EditingItem = None
       NewItem = ""
       MenuOpen = false
       Update = None
@@ -339,8 +364,8 @@ let update msg model =
             { model with
                 MenuSides = model.MenuSides @ [ side ]
                 NewSides = model.NewSides.Remove entryId },
-            fireAndForget (Db.addMenuSide side)
-        | _ -> model, Cmd.none
+            Cmd.batch [ fireAndForget (Db.addMenuSide side); forgetTyping ]
+        | _ -> model, forgetTyping
     | RemoveSide id ->
         { model with MenuSides = model.MenuSides |> List.filter (fun s -> s.id <> id) },
         fireAndForget (Db.removeMenuSide id)
@@ -411,12 +436,12 @@ let update msg model =
     | NewItemChanged text -> { model with NewItem = text }, Cmd.none
     | AddNewItem ->
         if model.NewItem.Trim() = "" then
-            model, Cmd.none
+            model, forgetTyping
         else
             let lists, items, plan = Db.planFreeItemAdd model.ShoppingLists model.ShoppingItems model.NewItem
 
             { model with ShoppingLists = lists; ShoppingItems = items; NewItem = "" },
-            fireAndForget (Db.addToShoppingList plan)
+            Cmd.batch [ fireAndForget (Db.addToShoppingList plan); forgetTyping ]
     | SetShoppingItemDone(id, isDone) ->
         let items =
             model.ShoppingItems
@@ -424,6 +449,32 @@ let update msg model =
             |> List.sortBy (fun i -> i.``done``, i.created_at, i.id)
 
         { model with ShoppingItems = items }, fireAndForget (Db.setShoppingItemDone id isDone)
+    | StartEditItem id ->
+        match model.ShoppingItems |> List.tryFind (fun i -> i.id = id) with
+        | Some item -> { model with EditingItem = Some(id, Shared.ShoppingItem.text item.quantity item.unit item.name) }, Cmd.none
+        | None -> model, Cmd.none
+    | EditItemChanged text ->
+        match model.EditingItem with
+        | Some(id, _) -> { model with EditingItem = Some(id, text) }, Cmd.none
+        | None -> model, Cmd.none
+    // A blank edit is a cancel; there is no way to delete from here.
+    | SaveEditItem ->
+        match model.EditingItem with
+        | Some(id, text) when text.Trim() <> "" ->
+            match model.ShoppingItems |> List.tryFind (fun i -> i.id = id) with
+            | Some item when text.Trim() <> Shared.ShoppingItem.text item.quantity item.unit item.name ->
+                let quantity, unit, name = Shared.ShoppingItem.edit item.quantity item.unit text
+
+                let items =
+                    model.ShoppingItems
+                    |> List.map (fun i -> if i.id = id then { i with name = name; quantity = quantity; unit = unit } else i)
+
+                { model with ShoppingItems = items; EditingItem = None },
+                Cmd.batch [ fireAndForget (Db.updateShoppingItem id name quantity unit); forgetTyping ]
+            | _ -> { model with EditingItem = None }, forgetTyping
+        | Some _ -> { model with EditingItem = None }, forgetTyping
+        | None -> model, Cmd.none
+    | CancelEditItem -> { model with EditingItem = None }, forgetTyping
     | ConfirmArchive what -> { model with PendingArchive = Some what }, Cmd.none
     | CancelArchive -> { model with PendingArchive = None }, Cmd.none
     // The model only holds live lists and menus, so dropping the current one
@@ -434,6 +485,7 @@ let update msg model =
             { model with
                 ShoppingLists = model.ShoppingLists |> List.filter (fun l -> l.id <> list.id)
                 NewItem = ""
+                EditingItem = None
                 PendingArchive = None },
             fireAndForget (Db.archiveShoppingList list.id)
         | None -> { model with PendingArchive = None }, Cmd.none
@@ -684,7 +736,7 @@ let private legalPage (title: string) (paragraphs: ReactElement list) dispatch =
         [ prop.className "flex min-h-screen flex-col px-4"
           prop.children
               [ Html.div
-                    [ prop.className "mx-auto w-full max-w-2xl flex-1 py-6 text-sm leading-relaxed text-gray-800"
+                    [ prop.className "mx-auto w-full max-w-2xl flex-1 pt-safe-6 pb-6 text-sm leading-relaxed text-gray-800"
                       prop.children
                           [ Html.div
                                 [ prop.className "mb-4 flex items-center gap-3"
@@ -885,7 +937,7 @@ let private detailPage (model: Model) (id: string) (known: CooklangEditor.KnownN
         // the editor taking every remaining pixel (CodeMirror scrolls inside
         // it), and the actions. Desktop: the same rows in normal flow.
         Html.form
-            [ prop.className "fixed inset-0 flex flex-col gap-3 p-4 pb-safe-4 md:static md:max-w-2xl md:p-0"
+            [ prop.className "fixed inset-0 flex flex-col gap-3 p-4 pt-safe-4 pb-safe-4 md:static md:max-w-2xl md:p-0"
               prop.onSubmit (fun e ->
                   e.preventDefault ()
                   dispatch (SaveRecipe id))
@@ -962,6 +1014,125 @@ let private newItemRow (text: string) dispatch =
 let private createdAge (createdAt: string) =
     "Created: " + Shared.Created.age DateTime.Now ((DateTime.Parse createdAt).ToLocalTime())
 
+/// Tap or long press on a list row. One press is in flight at a time: from
+/// pointer-down it is `Pending`; if the finger stays put for `holdMs` it
+/// becomes `Held` and the row goes into editing; lifting before that is a
+/// tap; moving (a scroll) or the browser cancelling it drops it.
+module private Press =
+    type State =
+        | Idle
+        | Pending of timer: float * x: float * y: float
+        | Held
+
+    /// How a press ended: lifted in time, lifted after the hold, or there
+    /// was no press on (a lift after a scroll cancelled it, or in a field).
+    type Ended =
+        | Tap
+        | LongPress
+        | NoPress
+
+    let private holdMs = 500
+    let private slop = 10.0
+    let mutable private state = Idle
+
+    let cancel () =
+        match state with
+        | Pending(timer, _, _) -> window.clearTimeout timer
+        | _ -> ()
+
+        state <- Idle
+
+    let start (e: Browser.Types.PointerEvent) (onHeld: unit -> unit) =
+        cancel ()
+
+        let timer =
+            window.setTimeout (
+                (fun () ->
+                    state <- Held
+                    onHeld ()),
+                holdMs
+            )
+
+        state <- Pending(timer, e.clientX, e.clientY)
+
+    let move (e: Browser.Types.PointerEvent) =
+        match state with
+        | Pending(_, x, y) when abs (e.clientX - x) > slop || abs (e.clientY - y) > slop -> cancel ()
+        | _ -> ()
+
+    /// What the press that just ended was, and puts things back to rest.
+    let finish () =
+        let ended = state
+        cancel ()
+
+        match ended with
+        | Pending _ -> Tap
+        | Held -> LongPress
+        | Idle -> NoPress
+
+/// A shopping-list row: a tap anywhere on it (text or box) checks it, a
+/// long press turns the text into a field for editing it. The box is only
+/// drawn for the pointer - the row handles the gesture - but still takes
+/// the keyboard. `editing` is the text typed so far while editing.
+let private itemRow (id: string) (text: string) (isDone: bool) (editing: string option) (onDone: bool -> unit) dispatch =
+    let field = $"edit-{id}"
+
+    Html.li
+        [ prop.key id
+          prop.children
+              [ Html.div
+                    [ prop.className "press-row flex select-none items-center gap-2 py-1"
+                      prop.onPointerDown (fun e ->
+                          if editing.IsNone && e.button = 0 then
+                              // Capture, so the rest of the press reaches this row
+                              // even once the span under the finger has become the field.
+                              e.currentTarget?setPointerCapture (e.pointerId)
+                              Press.start e (fun () -> dispatch (StartEditItem id)))
+                      prop.onPointerMove Press.move
+                      prop.onPointerCancel (fun _ -> Press.cancel ())
+                      prop.onPointerUp (fun _ ->
+                          match Press.finish () with
+                          | Press.Tap -> onDone (not isDone)
+                          // The field is on screen by now. Focusing it here, inside
+                          // the pointer event, is what makes iOS raise the keyboard;
+                          // from the timer it would not.
+                          | Press.LongPress ->
+                              match document.getElementById field with
+                              | null -> ()
+                              | el -> el.focus ()
+                          | Press.NoPress -> ())
+                      // Android's long-press menu, and the right-click one on desktop.
+                      prop.onContextMenu (fun e -> e.preventDefault ())
+                      prop.children
+                          [ Html.input
+                                [ prop.type' "checkbox"
+                                  prop.className "pointer-events-none"
+                                  prop.isChecked isDone
+                                  prop.onChange (fun (isChecked: bool) -> onDone isChecked) ]
+                            match editing with
+                            | Some draft ->
+                                Html.form
+                                    [ prop.className "flex min-w-0 flex-1"
+                                      prop.onSubmit (fun e ->
+                                          e.preventDefault ()
+                                          dispatch SaveEditItem)
+                                      prop.children
+                                          [ Html.input
+                                                [ prop.id field
+                                                  prop.className "min-w-0 flex-1 select-text bg-transparent py-0.5 outline-none"
+                                                  prop.type' "text"
+                                                  prop.ariaLabel "Edit item"
+                                                  prop.autoComplete "off"
+                                                  prop.custom ("enterKeyHint", "done")
+                                                  prop.value draft
+                                                  prop.onChange (EditItemChanged >> dispatch)
+                                                  prop.onKeyDown (fun e -> if e.key = "Escape" then dispatch CancelEditItem)
+                                                  prop.onBlur (fun _ -> dispatch SaveEditItem) ] ] ]
+                            | None ->
+                                Html.span
+                                    [ prop.className (if isDone then "text-gray-400 line-through" else "")
+                                      prop.text text ] ] ] ] ]
+
 let private shoppingListPage (model: Model) dispatch =
     let list = currentList model
 
@@ -969,6 +1140,23 @@ let private shoppingListPage (model: Model) dispatch =
         match list with
         | Some list -> model.ShoppingItems |> List.filter (fun i -> i.list_id = list.id)
         | None -> []
+
+    // Unchecked items, then the blank row, then what's already checked.
+    let todo, ``done`` = items |> List.partition (fun i -> i.``done`` = 0)
+
+    let row (item: ShoppingItem) =
+        let editing =
+            match model.EditingItem with
+            | Some(id, draft) when id = item.id -> Some draft
+            | _ -> None
+
+        itemRow
+            item.id
+            (Shared.ShoppingItem.text item.quantity item.unit item.name)
+            (item.``done`` <> 0)
+            editing
+            (fun isDone -> dispatch (SetShoppingItemDone(item.id, isDone)))
+            dispatch
 
     Html.div
         [ match list with
@@ -994,29 +1182,9 @@ let private shoppingListPage (model: Model) dispatch =
           Html.ul
               [ prop.className "flex flex-col gap-1"
                 prop.children
-                    [ for item in items do
-                          let isDone = item.``done`` <> 0
-
-                          Html.li
-                              [ prop.key item.id
-                                prop.children
-                                    [ // The whole row is the label, so tapping the text checks the box too.
-                                      Html.label
-                                          [ prop.className "flex cursor-pointer select-none items-center gap-2 py-1"
-                                            prop.children
-                                                [ Html.input
-                                                      [ prop.type' "checkbox"
-                                                        prop.isChecked isDone
-                                                        prop.onChange (fun (isChecked: bool) ->
-                                                            dispatch (SetShoppingItemDone(item.id, isChecked))) ]
-                                                  Html.span
-                                                      [ prop.className (if isDone then "text-gray-400 line-through" else "")
-                                                        prop.text (
-                                                            [ item.quantity; item.unit; item.name ]
-                                                            |> List.filter ((<>) "")
-                                                            |> String.concat " "
-                                                        ) ] ] ] ] ]
-                      newItemRow model.NewItem dispatch ] ]
+                    [ yield! List.map row todo
+                      newItemRow model.NewItem dispatch
+                      yield! List.map row ``done`` ] ]
           // Sides noted on the current menu, checkable here like the items
           // above. They live with the menu and are archived with it.
           match sideGroups (currentMenuSides model) with
@@ -1211,7 +1379,7 @@ let View () =
             [ navBar model.Page user dispatch
               mobileMenu model.Page user model.MenuOpen dispatch
               Html.main
-                  [ prop.className "px-4 py-3 pb-safe-16 md:pb-3"
+                  [ prop.className "px-4 pt-safe-3 pb-safe-16 md:py-3"
                     prop.children
                         [ match model.Page with
                           | RecipeList -> listPage model known dispatch
