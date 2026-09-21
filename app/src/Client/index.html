@@ -4,8 +4,10 @@
     <meta charset="utf-8" />
     <!-- viewport-fit=cover: when installed to a home screen the page runs
          under the iPhone home indicator; index.css pads the bottom row by
-         env(safe-area-inset-bottom). -->
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+         env(safe-area-inset-bottom). maximum-scale / user-scalable turn off
+         pinch zoom, which an app-like UI has no use for (index.css backs it
+         up with touch-action, since iOS ignores this in a browser tab). -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
     <title>Plaintext Pantry</title>
     <!-- Installable as a home-screen app. -->
     <link rel="manifest" href="/manifest.webmanifest" />

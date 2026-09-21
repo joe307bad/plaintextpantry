@@ -20,6 +20,12 @@
 }
 
 @layer base {
+  /* No pinch zoom, on top of the viewport meta in index.html: iOS Safari
+     ignores user-scalable=no in a browser tab but honours touch-action.
+     Panning is still allowed; the page scrolls as usual. */
+  html {
+    touch-action: pan-x pan-y;
+  }
   /* Buttons are sharp-cornered rectangles and dip slightly when pressed. */
   button,
   [type="button"],
