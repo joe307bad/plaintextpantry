@@ -1049,25 +1049,8 @@ let private detailPage (model: Model) (id: string) (known: CooklangEditor.KnownN
                                       prop.placeholder "Title"
                                       prop.value edit.Title
                                       prop.onChange (EditTitleChanged >> dispatch) ] ] ]
-                    detailTabs model.DetailTab dispatch
-                    // Both tabs stay mounted (the editor keeps its cursor and
-                    // undo history); the one not selected is hidden.
                     Html.div
-                        [ prop.className (
-                              "min-h-0 flex-1 overflow-y-auto md:block"
-                              + if model.DetailTab = RecipeTab then "" else " hidden"
-                          )
-                          prop.children [ stepsView edit.Body ] ]
-                    Html.div
-                        [ prop.className (
-                              "min-h-0 flex-1 flex-col [&>div]:min-h-0 [&>div]:flex-1 [&_.cm-editor]:h-full md:block"
-                              + if model.DetailTab = CooklangTab then " flex" else " hidden"
-                          )
-                          prop.children
-                              [ CooklangEditor.CooklangEditor(edit.Body, known, "Recipe", EditBodyChanged >> dispatch) ] ]
-                    // Right padding on phones keeps the row clear of the menu button.
-                    Html.div
-                        [ prop.className "flex shrink-0 flex-wrap items-center gap-2 pr-14 md:pr-0"
+                        [ prop.className "flex shrink-0 flex-wrap items-center gap-2"
                           prop.children
                               [ Html.button
                                     [ prop.type' "submit"
@@ -1085,7 +1068,25 @@ let private detailPage (model: Model) (id: string) (known: CooklangEditor.KnownN
                                     [ prop.type' "button"
                                       prop.className "ml-auto border border-red-300 px-3 py-1 text-red-600 hover:bg-red-50"
                                       prop.text "Delete"
-                                      prop.onClick (fun _ -> dispatch (ConfirmDelete id)) ] ] ] ] ]
+                                      prop.onClick (fun _ -> dispatch (ConfirmDelete id)) ] ] ]
+                    detailTabs model.DetailTab dispatch
+                    // Both tabs stay mounted (the editor keeps its cursor and
+                    // undo history); the one not selected is hidden.
+                    Html.div
+                        [ prop.className (
+                              "min-h-0 flex-1 overflow-y-auto"
+                              + if model.DetailTab = RecipeTab then "" else " hidden"
+                          )
+                          prop.children [ stepsView edit.Body ] ]
+                    // On desktop the form is in normal flow, so flex-1 is inert
+                    // and the editor falls back to its own min-height.
+                    Html.div
+                        [ prop.className (
+                              "min-h-0 flex-1 flex-col [&>div]:min-h-0 [&>div]:flex-1 [&_.cm-editor]:h-full"
+                              + if model.DetailTab = CooklangTab then " flex" else " hidden"
+                          )
+                          prop.children
+                              [ CooklangEditor.CooklangEditor(edit.Body, known, "Recipe", EditBodyChanged >> dispatch) ] ] ] ]
     | _ ->
         Html.div
             [ Html.p "Recipe not found (it may still be syncing, or it was deleted)."
