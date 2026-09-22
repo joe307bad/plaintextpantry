@@ -16,6 +16,9 @@ type Entry = { Title: string; Sides: string list }
 let private dpi = 300.0
 let private widthIn = 3.0
 let private marginIn = 0.2
+/// Page margin when printing: the image is inset by this on every side, so it
+/// lands inside the printer's printable area without touching the settings.
+let private pageMarginIn = 0.2
 
 /// Points to pixels at the print resolution.
 let private pt (n: float) = n * dpi / 72.0
@@ -144,8 +147,8 @@ let private render (logo: HTMLImageElement option) (name: string) (entries: Entr
     canvas.toDataURL ("image/jpeg", 0.92)
 
 /// Opens the print dialog on the rendered image. The iframe's page is 3in
-/// wide with no margins so the image prints at size on a receipt printer,
-/// and it is removed once the dialog closes.
+/// wide, with the image inset by the page margin, so it prints at size on
+/// a receipt printer; the iframe is removed once the dialog closes.
 let private show (name: string) (dataUrl: string) =
     let iframe = document.createElement "iframe" :?> HTMLIFrameElement
     iframe.setAttribute ("aria-hidden", "true")
@@ -158,7 +161,7 @@ let private show (name: string) (dataUrl: string) =
     let style = doc.createElement "style"
 
     style.textContent <-
-        $"@page {{ size: {widthIn}in auto; margin: 0 }} html, body {{ margin: 0 }} img {{ display: block; width: {widthIn}in }}"
+        $"@page {{ size: {widthIn}in auto; margin: {pageMarginIn}in }} html, body {{ margin: 0 }} img {{ display: block; width: {widthIn - 2.0 * pageMarginIn}in }}"
 
     doc.head.appendChild style |> ignore
     doc.title <- name

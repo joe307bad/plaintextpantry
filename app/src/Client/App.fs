@@ -53,6 +53,12 @@ let private isPublic page =
 /// Editable recipe fields, used by both the "New Recipe" modal and the detail page.
 type RecipeForm = { Title: string; Body: string }
 
+/// The two views of a recipe on its page: the steps as written up, or the
+/// Cooklang they come from.
+type DetailTab =
+    | RecipeTab
+    | CooklangTab
+
 /// A short message at the bottom of the screen. `Seq` lets a hide scheduled
 /// for an earlier toast leave a newer one alone; `Leaving` keeps it mounted
 /// while the exit animation plays.
@@ -114,6 +120,7 @@ type Model =
       NewRecipe: RecipeForm option
       /// Detail-page form; `None` until the recipe being viewed has loaded.
       Edit: RecipeForm option
+      DetailTab: DetailTab
       /// Recipe awaiting delete confirmation on the list page.
       PendingDelete: string option
       /// Menu entry awaiting confirmation to be taken off the menu.
@@ -177,6 +184,7 @@ type Msg =
     | AddRecipe
     | EditTitleChanged of string
     | EditBodyChanged of string
+    | SelectDetailTab of DetailTab
     | SaveRecipe of id: string
     | ConfirmDelete of id: string
     | CancelDelete
@@ -229,6 +237,7 @@ let init () =
       NewSides = Map.empty
       NewRecipe = None
       Edit = None
+      DetailTab = RecipeTab
       PendingDelete = None
       PendingMenuRemove = None
       PendingArchive = None
@@ -299,6 +308,8 @@ let private sideGroups (sides: MenuSide list) =
           Ids = group |> List.map (fun s -> s.id)
           Done = group |> List.forall (fun s -> s.``done`` <> 0) })
 
+type private Quantity = Cooklang.Quantity
+
 let private ingredientsOf (recipe: Recipe) =
     Cooklang.ingredients (Cooklang.parse recipe.body).Recipe
 
@@ -350,7 +361,7 @@ let update msg model =
             | RecipeDetail id -> findRecipe id model.Recipes |> Option.map formOf
             | _ -> None
 
-        { model with Page = page; Edit = edit; MenuOpen = false }, Cmd.none
+        { model with Page = page; Edit = edit; DetailTab = RecipeTab; MenuOpen = false }, Cmd.none
     | RecipesChanged recipes ->
         // Populate the detail form once the recipe arrives; never clobber an in-progress edit.
         let edit =
@@ -527,6 +538,7 @@ let update msg model =
         { model with Edit = model.Edit |> Option.map (fun r -> { r with Title = title }) }, Cmd.none
     | EditBodyChanged body ->
         { model with Edit = model.Edit |> Option.map (fun r -> { r with Body = body }) }, Cmd.none
+    | SelectDetailTab tab -> { model with DetailTab = tab }, Cmd.none
     | SaveRecipe id ->
         match model.Edit with
         | Some r when r.Title.Trim() <> "" ->
@@ -935,6 +947,84 @@ let private confirmShoppingAddModal (recipe: Recipe) dispatch =
         (AddToShoppingListAnyway recipe.id)
         dispatch
 
+let private quantityText (q: Cooklang.Quantity option) (unit: string option) =
+    let amount =
+        match q with
+        | Some(Quantity.Number n) -> string n
+        | Some(Quantity.Text t) -> t
+        | None -> ""
+
+    match amount, unit with
+    | "", None -> ""
+    | "", Some u -> u
+    | a, None -> a
+    | a, Some u -> $"{a} {u}"
+
+/// One step's items as running text: ingredient and cookware names in bold,
+/// with the amount after in grey; timers as their duration.
+let private stepText (items: Cooklang.Item list) =
+    [ for item in items do
+          match item with
+          | Cooklang.Item.Text t -> Html.text t
+          | Cooklang.Item.Ingredient i ->
+              Html.span [ prop.className "font-semibold"; prop.text i.Name ]
+
+              match quantityText i.Quantity i.Unit with
+              | "" -> ()
+              | q -> Html.span [ prop.className "text-gray-500"; prop.text $" ({q})" ]
+          | Cooklang.Item.Cookware c -> Html.span [ prop.className "font-semibold"; prop.text c.Name ]
+          | Cooklang.Item.Timer t ->
+              let duration = quantityText t.Quantity t.Unit
+              Html.text (if duration = "" then defaultArg t.Name "" else duration) ]
+
+/// The recipe as a numbered list of steps, with section headings and notes
+/// where they fall. Numbering runs through the whole recipe.
+let private stepsView (body: string) =
+    let recipe = (Cooklang.parse body).Recipe
+    let mutable n = 0
+
+    Html.div
+        [ prop.className "flex flex-col gap-3"
+          prop.children
+              [ if Cooklang.steps recipe |> List.isEmpty then
+                    Html.p [ prop.className "text-sm text-gray-500"; prop.text "No steps yet. Write some on the Cooklang tab." ]
+                for section in recipe.Sections do
+                    match section.Name with
+                    | Some name -> Html.h3 [ prop.className "font-semibold"; prop.text name ]
+                    | None -> ()
+
+                    for block in section.Blocks do
+                        match block with
+                        | Cooklang.Block.Step items ->
+                            n <- n + 1
+
+                            Html.div
+                                [ prop.className "flex gap-2"
+                                  prop.children
+                                      [ Html.span [ prop.className "w-6 shrink-0 text-right text-gray-500 tabular-nums"; prop.text $"{n}." ]
+                                        Html.p [ prop.className "min-w-0"; prop.children (stepText items) ] ] ]
+                        | Cooklang.Block.Note note ->
+                            Html.p [ prop.className "ml-8 text-sm text-gray-500 italic"; prop.text note ] ] ]
+
+let private detailTabs (current: DetailTab) dispatch =
+    Html.div
+        [ prop.className "flex shrink-0 gap-4 border-b border-gray-200"
+          prop.role "tablist"
+          prop.children
+              [ for tab, label in [ RecipeTab, "Recipe"; CooklangTab, "Cooklang" ] ->
+                    let selected = (tab = current)
+
+                    Html.button
+                        [ prop.type' "button"
+                          prop.role "tab"
+                          prop.ariaSelected selected
+                          prop.className (
+                              "-mb-px border-b-2 px-1 py-1 text-sm "
+                              + if selected then "border-brand font-semibold text-ink" else "border-transparent text-gray-500 hover:text-ink"
+                          )
+                          prop.text label
+                          prop.onClick (fun _ -> dispatch (SelectDetailTab tab)) ] ] ]
+
 let private detailPage (model: Model) (id: string) (known: CooklangEditor.KnownNames) dispatch =
     match findRecipe id model.Recipes, model.Edit with
     | Some _, Some edit ->
@@ -959,9 +1049,20 @@ let private detailPage (model: Model) (id: string) (known: CooklangEditor.KnownN
                                       prop.placeholder "Title"
                                       prop.value edit.Title
                                       prop.onChange (EditTitleChanged >> dispatch) ] ] ]
+                    detailTabs model.DetailTab dispatch
+                    // Both tabs stay mounted (the editor keeps its cursor and
+                    // undo history); the one not selected is hidden.
                     Html.div
-                        [ prop.className
-                              "flex min-h-0 flex-1 flex-col [&>div]:min-h-0 [&>div]:flex-1 [&_.cm-editor]:h-full md:block"
+                        [ prop.className (
+                              "min-h-0 flex-1 overflow-y-auto md:block"
+                              + if model.DetailTab = RecipeTab then "" else " hidden"
+                          )
+                          prop.children [ stepsView edit.Body ] ]
+                    Html.div
+                        [ prop.className (
+                              "min-h-0 flex-1 flex-col [&>div]:min-h-0 [&>div]:flex-1 [&_.cm-editor]:h-full md:block"
+                              + if model.DetailTab = CooklangTab then " flex" else " hidden"
+                          )
                           prop.children
                               [ CooklangEditor.CooklangEditor(edit.Body, known, "Recipe", EditBodyChanged >> dispatch) ] ]
                     // Right padding on phones keeps the row clear of the menu button.
