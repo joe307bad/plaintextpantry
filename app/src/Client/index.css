@@ -63,11 +63,8 @@
 @utility bottom-safe-16 {
   bottom: calc(--spacing(16) + env(safe-area-inset-bottom, 0px));
 }
-@utility pb-safe-4 {
-  padding-bottom: calc(--spacing(4) + env(safe-area-inset-bottom, 0px));
-}
-@utility pb-safe-16 {
-  padding-bottom: calc(--spacing(16) + env(safe-area-inset-bottom, 0px));
+@utility pb-safe-* {
+  padding-bottom: calc(--spacing(--value(integer)) + env(safe-area-inset-bottom, 0px));
 }
 /* Likewise at the top: installed, the page runs up under the status bar
    (clock, signal), so the first line needs its height added. */

@@ -1168,9 +1168,10 @@ let private shoppingListPage (model: Model) dispatch =
     Html.div
         [ match list with
           | Some list ->
-              // Bottom-left, on the same line as the menu button bottom-right.
+              // Bottom-left, on the same line as the menu button bottom-right;
+              // the same white pill, since it floats over the list.
               Html.p
-                  [ prop.className "fixed bottom-safe-4 left-4 z-50 flex h-9 items-center text-sm text-gray-500"
+                  [ prop.className "fixed bottom-safe-4 left-4 z-50 flex h-9 items-center rounded-full bg-white px-3 text-sm text-gray-500 shadow-lg shadow-black/15"
                     prop.text (createdAge list.created_at) ]
               Html.div
                   [ // Phones: name left, button at the right edge. Desktop: both on the left.
@@ -1284,9 +1285,10 @@ let private menuPage (model: Model) dispatch =
     Html.div
         [ match menu with
           | Some menu ->
-              // Bottom-left, on the same line as the menu button bottom-right.
+              // Bottom-left, on the same line as the menu button bottom-right;
+              // the same white pill, since it floats over the list.
               Html.p
-                  [ prop.className "fixed bottom-safe-4 left-4 z-50 flex h-9 items-center text-sm text-gray-500"
+                  [ prop.className "fixed bottom-safe-4 left-4 z-50 flex h-9 items-center rounded-full bg-white px-3 text-sm text-gray-500 shadow-lg shadow-black/15"
                     prop.text (createdAge menu.created_at) ]
               // As tall as the recipe list's "New Recipe" button, so the two
               // lists start on the same line. Phones: name left, button at the
@@ -1386,7 +1388,9 @@ let View () =
             [ navBar model.Page user dispatch
               mobileMenu model.Page user model.MenuOpen dispatch
               Html.main
-                  [ prop.className "px-4 pt-safe-3 pb-safe-16 md:py-3"
+                  [ // Enough bottom padding that the last row scrolls clear of the
+                    // fixed "Created" pill and menu button.
+                    prop.className "px-4 pt-safe-3 pb-safe-24 md:py-3"
                     prop.children
                         [ match model.Page with
                           | RecipeList -> listPage model known dispatch
