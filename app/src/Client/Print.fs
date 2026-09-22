@@ -31,6 +31,10 @@ type private Font = { Css: string; Size: float; Color: string }
 let private heading = { Css = $"bold {pt 13.0}px Helvetica, Arial, sans-serif"; Size = pt 13.0; Color = "#212121" }
 let private recipe = { Css = $"{pt 14.0}px Helvetica, Arial, sans-serif"; Size = pt 14.0; Color = "#212121" }
 
+/// The logo beside the menu name: a square this big, then this much gap.
+let private logoSize = pt 18.0
+let private logoGap = pt 5.0
+
 /// "Tacos w/ rice", "… w/ rice and beans", "… w/ rice, beans, and slaw".
 let private withSides (e: Entry) =
     match e.Sides with
@@ -62,8 +66,9 @@ let private wrap (ctx: obj) (font: Font) (maxWidth: float) (text: string) =
         ([], "")
     |> fun (lines, last) -> List.rev (last :: lines)
 
-/// Lays the menu out top to bottom: the name, then each entry as "n. title
-/// w/ sides". Returns the lines and the total height.
+/// Lays the menu out top to bottom: the logo and name, then each entry as
+/// "n. title w/ sides". Returns the lines, where the logo goes (its top-left
+/// corner) and the total height.
 let private layout (ctx: obj) (name: string) (entries: Entry list) =
     let margin = marginIn * dpi + borderWidth
     let contentWidth = widthIn * dpi - 2.0 * margin
@@ -79,7 +84,14 @@ let private layout (ctx: obj) (name: string) (entries: Entry list) =
             y <- y + leading font
             lines.Add { Text = l; Font = font; X = x; Y = y - (leading font - font.Size) / 2.0 }
 
-    write heading margin name
+    // The name starts to the right of the logo, which is centred on the
+    // name's first line (the cap height of the heading font is about 0.72em).
+    let nameX = margin + logoSize + logoGap
+    write heading nameX name
+    let firstBaseline = lines[0].Y
+    let logoAt = margin, firstBaseline - heading.Size * 0.36 - logoSize / 2.0
+    // A one-line name is shorter than the logo; carry on below whichever is lower.
+    y <- max y (snd logoAt + logoSize)
     y <- y + pt 4.0
 
     entries
@@ -91,16 +103,24 @@ let private layout (ctx: obj) (name: string) (entries: Entry list) =
         write recipe (margin + numberWidth) (withSides e)
         lines.Add { Text = $"{i + 1}."; Font = recipe; X = margin; Y = numberY + leading recipe - (leading recipe - recipe.Size) / 2.0 })
 
-    List.ofSeq lines, y + margin
+    List.ofSeq lines, logoAt, y + margin
+
+/// Loads the logo; `None` if it cannot be, so the menu still prints.
+let private loadLogo () : JS.Promise<HTMLImageElement option> =
+    Promise.create (fun resolve _ ->
+        let img = document.createElement "img" :?> HTMLImageElement
+        img.onload <- fun _ -> resolve (Some img)
+        img.onerror <- fun _ -> resolve None
+        img.src <- "/brand/icon.png")
 
 /// Draws the menu to a canvas and returns it as a JPEG data URL.
-let private render (name: string) (entries: Entry list) =
+let private render (logo: HTMLImageElement option) (name: string) (entries: Entry list) =
     let canvas = document.createElement "canvas" :?> HTMLCanvasElement
     let ctx: obj = canvas?getContext("2d")
 
     // Measure first so the canvas can be exactly as tall as the content;
     // sizing a canvas resets its context, so the fonts are set again below.
-    let lines, height = layout ctx name entries
+    let lines, (logoX, logoY), height = layout ctx name entries
     canvas.width <- int (widthIn * dpi)
     canvas.height <- int (ceil height)
 
@@ -112,6 +132,10 @@ let private render (name: string) (entries: Entry list) =
     ctx?strokeRect (borderWidth / 2.0, borderWidth / 2.0, float canvas.width - borderWidth, float canvas.height - borderWidth)
     ctx?textBaseline <- "alphabetic"
 
+    match logo with
+    | Some img -> ctx?drawImage (img, logoX, logoY, logoSize, logoSize)
+    | None -> ()
+
     for l in lines do
         ctx?font <- l.Font.Css
         ctx?fillStyle <- l.Font.Color
@@ -122,9 +146,7 @@ let private render (name: string) (entries: Entry list) =
 /// Opens the print dialog on the rendered image. The iframe's page is 3in
 /// wide with no margins so the image prints at size on a receipt printer,
 /// and it is removed once the dialog closes.
-let menu (name: string) (entries: Entry list) =
-    let dataUrl = render name entries
-
+let private show (name: string) (dataUrl: string) =
     let iframe = document.createElement "iframe" :?> HTMLIFrameElement
     iframe.setAttribute ("aria-hidden", "true")
     iframe.setAttribute ("style", "position: fixed; right: 0; bottom: 0; width: 0; height: 0; border: 0")
@@ -153,3 +175,8 @@ let menu (name: string) (entries: Entry list) =
 
     img.src <- dataUrl
     doc.body.appendChild img |> ignore
+
+/// Renders the menu and opens the print dialog on it.
+let menu (name: string) (entries: Entry list) =
+    loadLogo ()
+    |> Promise.iter (fun logo -> show name (render logo name entries))
