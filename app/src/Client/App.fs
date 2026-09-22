@@ -313,6 +313,15 @@ let private addToShoppingList (recipe: Recipe) (model: Model) =
         PendingShoppingAdd = None },
     fireAndForget (Db.addToShoppingList plan)
 
+/// `addToShoppingList`, then a toast naming the list it went on.
+let private addToShoppingListWithToast (recipe: Recipe) (model: Model) =
+    if (ingredientsOf recipe).IsEmpty then
+        toast $"\"{recipe.title}\" has no ingredients to add" model
+    else
+        let model, cmd = addToShoppingList recipe model
+        let model, showToast = toast $"\"{recipe.title}\" added to {(List.head model.ShoppingLists).name}" model
+        model, Cmd.batch [ cmd; showToast ]
+
 let update msg model =
     match msg with
     | SessionChecked(Some user) ->
@@ -384,11 +393,11 @@ let update msg model =
         | Some recipe when Db.allIngredientsPresent model.ShoppingLists model.ShoppingItems (ingredientsOf recipe) ->
             // Probably a double tap; ask before doubling the quantities.
             { model with PendingShoppingAdd = Some id }, Cmd.none
-        | Some recipe -> addToShoppingList recipe model
+        | Some recipe -> addToShoppingListWithToast recipe model
         | None -> model, Cmd.none
     | AddToShoppingListAnyway id ->
         match findRecipe id model.Recipes with
-        | Some recipe -> addToShoppingList recipe model
+        | Some recipe -> addToShoppingListWithToast recipe model
         | None -> { model with PendingShoppingAdd = None }, Cmd.none
     | CancelShoppingAdd -> { model with PendingShoppingAdd = None }, Cmd.none
     | AddToMenu id ->
@@ -527,7 +536,8 @@ let update msg model =
                 model.Recipes
                 |> List.map (fun x -> if x.id = id then { x with title = title; body = r.Body } else x)
 
-            { model with Recipes = recipes }, fireAndForget (Db.updateRecipe id title r.Body)
+            let model, showToast = toast $"\"{title}\" saved" { model with Recipes = recipes }
+            model, Cmd.batch [ fireAndForget (Db.updateRecipe id title r.Body); showToast ]
         | _ -> model, Cmd.none
     | ConfirmDelete id -> { model with PendingDelete = Some id }, Cmd.none
     | CancelDelete -> { model with PendingDelete = None }, Cmd.none
@@ -906,16 +916,13 @@ let private listPage (model: Model) (known: CooklangEditor.KnownNames) dispatch 
                                                 prop.onClick (fun _ -> dispatch (ConfirmDelete r.id)) ]
                                           Html.button
                                               [ prop.type' "button"
-                                                prop.className "icon-btn px-1 text-gray-400 hover:text-green-700"
+                                                prop.className "icon-btn -ml-2 px-1 text-gray-400 hover:text-green-700"
                                                 prop.title "Add to menu"
                                                 prop.text "+"
                                                 prop.onClick (fun _ -> dispatch (AddToMenu r.id)) ]
                                           linkWith "text-blue-600 underline hover:text-blue-800" dispatch [ "recipe"; r.id ] r.title ] ] ] ]
           match model.NewRecipe with
           | Some recipe -> newRecipeModal recipe known dispatch
-          | None -> Html.none
-          match model.PendingDelete |> Option.bind (fun id -> findRecipe id model.Recipes) with
-          | Some recipe -> confirmDeleteModal recipe dispatch
           | None -> Html.none ]
 
 /// Shown when every ingredient of the recipe is already on the current list.
@@ -977,7 +984,7 @@ let private detailPage (model: Model) (id: string) (known: CooklangEditor.KnownN
                                     [ prop.type' "button"
                                       prop.className "ml-auto border border-red-300 px-3 py-1 text-red-600 hover:bg-red-50"
                                       prop.text "Delete"
-                                      prop.onClick (fun _ -> dispatch (DeleteRecipe id)) ] ] ] ] ]
+                                      prop.onClick (fun _ -> dispatch (ConfirmDelete id)) ] ] ] ] ]
     | _ ->
         Html.div
             [ Html.p "Recipe not found (it may still be syncing, or it was deleted)."
@@ -1328,7 +1335,7 @@ let private menuPage (model: Model) dispatch =
                                                             prop.text $"{i + 1}." ]
                                                       Html.button
                                                           [ prop.type' "button"
-                                                            prop.className "icon-btn px-1 text-gray-400 hover:text-red-600"
+                                                            prop.className "icon-btn -ml-2 px-1 text-gray-400 hover:text-red-600"
                                                             prop.title "Remove from menu"
                                                             prop.text "×"
                                                             prop.onClick (fun _ -> dispatch (ConfirmMenuRemove e.id)) ]
@@ -1392,6 +1399,9 @@ let View () =
                           | NotFound -> Html.p "Page not found." ] ]
               match model.PendingShoppingAdd |> Option.bind (fun id -> findRecipe id model.Recipes) with
               | Some recipe -> confirmShoppingAddModal recipe dispatch
+              | None -> Html.none
+              match model.PendingDelete |> Option.bind (fun id -> findRecipe id model.Recipes) with
+              | Some recipe -> confirmDeleteModal recipe dispatch
               | None -> Html.none
               match model.PendingArchive with
               | Some CurrentShoppingList ->
