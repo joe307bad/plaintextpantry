@@ -2,7 +2,10 @@
 ///
 ///   - The browser: OIDC authorization-code login (ASP.NET Core's handler does
 ///     PKCE, state/nonce, the token exchange and id_token validation) ending
-///     in an httpOnly session cookie. Keycloak is only in the login path.
+///     in an httpOnly cookie that outlives the browser session. The login also
+///     asks for an offline refresh token, which rides along inside that cookie
+///     and is spent against Keycloak once a day; so a session ends when it is
+///     revoked, not when something expires. See "Staying signed in" below.
 ///   - MCP clients: a bearer access token minted by Keycloak for the
 ///     `McpResource` audience. Verified against the realm's published keys;
 ///     a web-session token is refused here because it lacks that audience.
@@ -24,6 +27,7 @@ open Microsoft.AspNetCore.Authentication.OpenIdConnect
 open Microsoft.AspNetCore.DataProtection
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.DependencyInjection
+open Microsoft.Extensions.Logging
 open Microsoft.IdentityModel.Tokens
 open ModelContextProtocol.AspNetCore.Authentication
 open ModelContextProtocol.Authentication
@@ -41,6 +45,138 @@ let mcpScheme = "McpBearer"
 /// realm (infra/keycloak/provision.sh creates exactly these).
 let mcpScopes =
     [ "mcp"; "recipes:read"; "recipes:write"; "shopping:read"; "shopping:write"; "menus:read"; "menus:write" ]
+
+// ---------------------------------------------------------------------------
+// Staying signed in
+// ---------------------------------------------------------------------------
+//
+// The cookie is persistent (`IsPersistent`): without that ASP.NET writes it
+// with no `Expires`, making it a browser-session cookie that an installed PWA
+// loses every time the OS reaps the app - which is what "logged out again"
+// actually was. Persistent plus a long window plus sliding expiry keeps anyone
+// who opens the app signed in indefinitely.
+//
+// The other half is Keycloak's. The login asks for `offline_access`, so the
+// refresh token it hands back is an offline token: it survives Keycloak's own
+// SSO session, restarts and deploys. We keep it in the cookie and spend it
+// once a day. A success re-issues the cookie (fresh expiry, fresh tokens); a
+// refusal from Keycloak - the account was disabled, deleted, or signed out
+// everywhere - is the one thing that ends the session.
+
+let private http = new HttpClient()
+
+/// Asked for at login: makes Keycloak's refresh token an offline one.
+let private offlineScope = "offline_access"
+
+/// How long a cookie may go without being checked against Keycloak. Long
+/// enough that an app in daily use hardly ever calls the token endpoint,
+/// short enough that a revoked account is out by tomorrow.
+let private renewEvery = TimeSpan.FromHours 24.
+
+/// Keycloak was unreachable (restarting mid-deploy, a network blip). Nobody
+/// gets signed out for that; we just try again soon.
+let private retryIn = TimeSpan.FromHours 1.
+
+/// Property holding when the refresh token is next due to be spent.
+let private renewAtKey = "ptp:renew_at"
+
+let private renewAt (span: TimeSpan) = DateTimeOffset.UtcNow.Add(span).ToString "o"
+
+let private renewalDue (props: AuthenticationProperties) =
+    match props.GetString renewAtKey with
+    | null -> true // a cookie minted before any of this existed
+    | at ->
+        match DateTimeOffset.TryParse(at, Globalization.CultureInfo.InvariantCulture, Globalization.DateTimeStyles.RoundtripKind) with
+        | true, at -> at <= DateTimeOffset.UtcNow
+        | _ -> true
+
+/// Replaces the tokens carried by the cookie, skipping the ones we don't have.
+let private storeTokens (props: AuthenticationProperties) (idToken: string option) (refreshToken: string option) =
+    props.StoreTokens
+        [ for name, value in [ "id_token", idToken; "refresh_token", refreshToken ] do
+              match value with
+              | Some v when not (String.IsNullOrEmpty v) -> AuthenticationToken(Name = name, Value = v)
+              | _ -> () ]
+
+type private Renewal =
+    | Renewed of refreshToken: string * idToken: string option
+    /// Keycloak answered, and the answer was no. The session is over.
+    | Revoked of detail: string
+    /// No answer worth acting on. Keep the session.
+    | Unavailable of detail: string
+
+let private jsonField (body: string) (name: string) =
+    try
+        match JsonDocument.Parse(body).RootElement.TryGetProperty name with
+        | true, v -> Some(v.GetString())
+        | _ -> None
+    with _ ->
+        None
+
+let private form (pairs: (string * string) list) =
+    new FormUrlEncodedContent(pairs |> List.map KeyValuePair)
+
+let private tokenEndpoint (config: Config) =
+    $"{config.KeycloakMetadataUrl}/protocol/openid-connect/token"
+
+/// Trades the refresh token for a fresh one (Keycloak rotates on every use).
+let private renew (config: Config) (refreshToken: string) =
+    task {
+        try
+            use! resp =
+                http.PostAsync(
+                    tokenEndpoint config,
+                    form
+                        [ "grant_type", "refresh_token"
+                          "client_id", config.KeycloakClientId
+                          "client_secret", config.KeycloakClientSecret
+                          "refresh_token", refreshToken ]
+                )
+
+            let! body = resp.Content.ReadAsStringAsync()
+
+            if resp.IsSuccessStatusCode then
+                match jsonField body "refresh_token" with
+                | Some token -> return Renewed(token, jsonField body "id_token")
+                | None -> return Unavailable "no refresh_token in the response"
+            else
+                // Only Keycloak's own "this grant is dead" verdict ends a
+                // session. A wrong client secret or a half-started Keycloak
+                // must never sign the whole userbase out.
+                match jsonField body "error" with
+                | Some "invalid_grant" -> return Revoked body
+                | _ -> return Unavailable $"{int resp.StatusCode}: {body}"
+        with e ->
+            return Unavailable e.Message
+    }
+
+/// Runs on every request that carries the cookie.
+let private validateSession (config: Config) (ctx: CookieValidatePrincipalContext) =
+    task {
+        match ctx.Properties.GetTokenValue "refresh_token" with
+        // Dev auto-login without one, or a cookie from before offline tokens:
+        // nothing to check against, and the cookie's own expiry still applies.
+        | null -> ()
+        | refreshToken when renewalDue ctx.Properties ->
+            let log =
+                ctx.HttpContext.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger "Server.Auth"
+
+            match! renew config refreshToken with
+            | Renewed(refreshToken, idToken) ->
+                let idToken = idToken |> Option.orElse (Option.ofObj (ctx.Properties.GetTokenValue "id_token"))
+                storeTokens ctx.Properties idToken (Some refreshToken)
+                ctx.Properties.SetString(renewAtKey, renewAt renewEvery)
+                ctx.ShouldRenew <- true
+            | Unavailable detail ->
+                log.LogWarning("Session renewal deferred: {Detail}", detail)
+                ctx.Properties.SetString(renewAtKey, renewAt retryIn)
+                ctx.ShouldRenew <- true
+            | Revoked detail ->
+                log.LogInformation("Session revoked by Keycloak: {Detail}", detail)
+                ctx.RejectPrincipal()
+                do! ctx.HttpContext.SignOutAsync cookieScheme
+        | _ -> ()
+    }
 
 let configure (services: IServiceCollection) (config: Config) =
     let metadata = $"{config.KeycloakMetadataUrl}/.well-known/openid-configuration"
@@ -67,8 +203,11 @@ let configure (services: IServiceCollection) (config: Config) =
             o.Cookie.HttpOnly <- true
             o.Cookie.SameSite <- SameSiteMode.Lax
             o.Cookie.SecurePolicy <- CookieSecurePolicy.SameAsRequest
-            o.ExpireTimeSpan <- TimeSpan.FromDays 30.
+            // 400 days is as far ahead as browsers will honour an expiry;
+            // sliding expiration and the daily renewal below push it along.
+            o.ExpireTimeSpan <- TimeSpan.FromDays 400.
             o.SlidingExpiration <- true
+            o.Events.OnValidatePrincipal <- fun ctx -> validateSession config ctx :> Task
             // Fetches from the app get a status code, never a redirect to Keycloak.
             o.Events.OnRedirectToLogin <- fun ctx -> (ctx.Response.StatusCode <- 401; Task.CompletedTask)
             o.Events.OnRedirectToAccessDenied <- fun ctx -> (ctx.Response.StatusCode <- 403; Task.CompletedTask))
@@ -80,14 +219,26 @@ let configure (services: IServiceCollection) (config: Config) =
             o.ClientSecret <- config.KeycloakClientSecret
             o.ResponseType <- "code"
             o.UsePkce <- true
-            // Keep only the id_token in the session (not the access/refresh
-            // tokens, which would triple the cookie's size): logout passes it
-            // as id_token_hint so Keycloak ends the session without asking.
+            // The access token is never used (this server talks to its own
+            // database, and mints PowerSync's JWT itself), so instead of
+            // SaveTokens' four entries the cookie keeps two: the id_token,
+            // which logout passes as id_token_hint so Keycloak ends its
+            // session without asking, and the offline refresh token that
+            // validateSession spends.
             o.SaveTokens <- false
+            // Otherwise the cookie would inherit the id_token's lifetime -
+            // minutes - instead of ExpireTimeSpan. It is the default; say it
+            // out loud, because the failure mode is "logged out constantly".
+            o.UseTokenLifetime <- false
 
             o.Events.OnTokenValidated <-
                 fun ctx ->
-                    ctx.Properties.StoreTokens [ AuthenticationToken(Name = "id_token", Value = ctx.TokenEndpointResponse.IdToken) ]
+                    storeTokens
+                        ctx.Properties
+                        (Option.ofObj ctx.TokenEndpointResponse.IdToken)
+                        (Option.ofObj ctx.TokenEndpointResponse.RefreshToken)
+
+                    ctx.Properties.SetString(renewAtKey, renewAt renewEvery)
                     Task.CompletedTask
 
             // Skip Keycloak's own login page: go straight to the Google
@@ -99,6 +250,10 @@ let configure (services: IServiceCollection) (config: Config) =
                     Task.CompletedTask
 
             o.Scope.Add "email"
+            // The refresh token that comes back is then an offline one: it
+            // does not die with Keycloak's SSO session, so a session can be
+            // renewed months later without the user seeing a login page.
+            o.Scope.Add offlineScope
             o.CallbackPath <- PathString "/api/auth/callback"
             o.SignedOutCallbackPath <- PathString "/api/auth/signout-callback"
             // Keep Keycloak's claim names (sub, email, name) instead of the
@@ -184,27 +339,24 @@ let requireUser: HttpHandler =
         | Some _ -> next ctx
         | None -> (setStatusCode 401 >=> json (Thoth.Json.Core.Encode.object [ "error", Thoth.Json.Core.Encode.string "Not signed in" ])) next ctx
 
-let private http = new HttpClient()
-
 /// Local dev: sign the configured Keycloak account in without a trip
 /// through Keycloak's pages. Password grant (direct access, enabled on the
 /// client only when the realm was provisioned in dev mode), then /userinfo
 /// for the claims, then the same cookie a real login would set.
 let private devAutoLogin (config: Config) (user: string) (password: string) (ctx: HttpContext) =
     task {
-        let form (pairs: (string * string) list) =
-            new FormUrlEncodedContent(pairs |> List.map KeyValuePair)
-
         use! tokenResp =
             http.PostAsync(
-                $"{config.KeycloakMetadataUrl}/protocol/openid-connect/token",
+                tokenEndpoint config,
                 form
                     [ "grant_type", "password"
                       "client_id", config.KeycloakClientId
                       "client_secret", config.KeycloakClientSecret
                       "username", user
                       "password", password
-                      "scope", "openid email profile" ]
+                      // offline_access here too, so dev exercises the same
+                      // renewal path production runs on.
+                      "scope", $"openid email profile {offlineScope}" ]
             )
 
         let! tokenBody = tokenResp.Content.ReadAsStringAsync()
@@ -226,7 +378,11 @@ let private devAutoLogin (config: Config) (user: string) (password: string) (ctx
             | _ -> []
 
         let identity = ClaimsIdentity(claim "sub" @ claim "email" @ claim "name" @ claim "preferred_username", cookieScheme)
-        do! ctx.SignInAsync(cookieScheme, ClaimsPrincipal identity)
+        let props = AuthenticationProperties(IsPersistent = true)
+        storeTokens props (jsonField tokenBody "id_token") (jsonField tokenBody "refresh_token")
+        props.SetString(renewAtKey, renewAt renewEvery)
+
+        do! ctx.SignInAsync(cookieScheme, ClaimsPrincipal identity, props)
         ctx.User <- ClaimsPrincipal identity
     }
 
@@ -253,7 +409,11 @@ let login (config: Config) : HttpHandler =
             | Some(user, password) ->
                 do! devAutoLogin config user password ctx
                 ctx.Response.Redirect(safeReturnTo ctx)
-            | None -> do! ctx.ChallengeAsync(oidcScheme, AuthenticationProperties(RedirectUri = safeReturnTo ctx))
+            | None ->
+                // IsPersistent is what puts an Expires on the cookie. Without
+                // it the session dies with the browser - or, on a phone, with
+                // the installed app.
+                do! ctx.ChallengeAsync(oidcScheme, AuthenticationProperties(IsPersistent = true, RedirectUri = safeReturnTo ctx))
 
             return Some ctx
         }

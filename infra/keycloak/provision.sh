@@ -85,6 +85,14 @@ REALM_ARGS=(
   -s registrationAllowed=false -s resetPasswordAllowed=false -s verifyEmail=false
   -s loginWithEmailAllowed=true -s duplicateEmailsAllowed=false -s rememberMe=true
   -s sslRequired=external -s enabled=true
+  # Sessions (seconds). What keeps someone signed in to the app is the F#
+  # server's own cookie plus the OFFLINE refresh token stored inside it, which
+  # the server spends once a day (Server/Auth.fs). Offline sessions are the
+  # ones that have to last: 60 days of not opening the app at all, and no
+  # maximum, so an app in regular use is never signed out. The ordinary SSO
+  # session only spans a login here, so it stays at Keycloak's defaults.
+  -s offlineSessionIdleTimeout=5184000
+  -s offlineSessionMaxLifespanEnabled=false
 )
 if kc get "realms/$REALM" >/dev/null 2>&1; then
   kc update "realms/$REALM" "${REALM_ARGS[@]}"
@@ -154,6 +162,9 @@ WEB_ID=$(upsert clients clientId "$WEB_CLIENT" \
 for scope in $SCOPES; do
   kc update "clients/$WEB_ID/optional-client-scopes/$(scope_id "$scope")" -r "$REALM" >/dev/null 2>&1 || true
 done
+# Built into every realm, and how the server asks for an offline refresh token.
+# New clients get it by default; make sure of it for one provisioned earlier.
+kc update "clients/$WEB_ID/optional-client-scopes/$(scope_id offline_access)" -r "$REALM" >/dev/null 2>&1 || true
 echo "  client $WEB_CLIENT (redirects $REDIRECTS)"
 
 # --- who can sign in ------------------------------------------------------------
