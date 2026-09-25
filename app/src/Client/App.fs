@@ -1216,6 +1216,7 @@ module private Press =
 /// the keyboard. `editing` is the text typed so far while editing. `source`
 /// is the recipes the item comes from, "(Focaccia)", shown beside the text
 /// and left out of it: editing changes the item, never where it came from.
+/// On a phone it drops to a second line of its own instead.
 let private itemRow (id: string) (text: string) (source: string) (isDone: bool) (editing: string option) (onDone: bool -> unit) dispatch =
     let field = $"edit-{id}"
 
@@ -1271,17 +1272,23 @@ let private itemRow (id: string) (text: string) (source: string) (isDone: bool) 
                                                   prop.onKeyDown (fun e -> if e.key = "Escape" then dispatch CancelEditItem)
                                                   prop.onBlur (fun _ -> dispatch SaveEditItem) ] ] ]
                             | None ->
-                                Html.span
-                                    [ prop.className (if isDone then "text-gray-400 line-through" else "")
-                                      prop.text text ]
+                                // Phones: the recipe goes under the item, indented a
+                                // little, so a long one doesn't push the item itself
+                                // into wrapping. Desktop has room for one line.
+                                Html.div
+                                    [ prop.className "flex min-w-0 flex-1 flex-col md:flex-row md:items-center md:gap-2"
+                                      prop.children
+                                          [ Html.span
+                                                [ prop.className (if isDone then "text-gray-400 line-through" else "")
+                                                  prop.text text ]
 
-                                if source <> "" then
-                                    Html.span
-                                        [ prop.className (
-                                              "min-w-0 truncate text-sm "
-                                              + (if isDone then "text-gray-300" else "text-gray-400")
-                                          )
-                                          prop.text source ] ] ] ] ]
+                                            if source <> "" then
+                                                Html.span
+                                                    [ prop.className (
+                                                          "min-w-0 truncate pl-3 text-sm md:pl-0 "
+                                                          + (if isDone then "text-gray-300" else "text-gray-400")
+                                                      )
+                                                      prop.text source ] ] ] ] ] ] ]
 
 let private shoppingListPage (model: Model) dispatch =
     let list = currentList model
