@@ -38,3 +38,38 @@ let ``editing the quantity or unit takes the whole line as the name`` () =
 [<Fact>]
 let ``editing a plain item is just a rename`` () =
     Assert.Equal(("", "", "oat milk"), ShoppingItem.edit "" "" "oat milk")
+
+/// The recipes behind a line, read off their Cooklang the way the shopping
+/// list page derives them.
+let private ingredientsOf (title: string, body: string) =
+    title, Cooklang.ingredients (Cooklang.parse body).Recipe |> List.map (fun i -> i.Name)
+
+let private focaccia = "Focaccia", "Mix @flour{500%g} with @water{350%g} and @salt{}."
+let private pizza = "Pizza", "Knead @Flour{300%g} into a base."
+
+[<Fact>]
+let ``an ingredient names the recipes calling for it, whatever the case`` () =
+    let recipes = [ focaccia; pizza ] |> List.map ingredientsOf
+    Assert.Equal<string list>([ "Focaccia"; "Pizza" ], ShoppingItem.sources recipes "flour")
+    Assert.Equal<string list>([ "Focaccia" ], ShoppingItem.sources recipes " Water ")
+    Assert.Equal<string list>([], ShoppingItem.sources recipes "oat milk")
+
+[<Fact>]
+let ``taking the ingredient out of the recipe drops the recipe`` () =
+    let without = [ "Focaccia", "Mix @water{350%g} and @salt{}." ] |> List.map ingredientsOf
+    Assert.Equal<string list>([], ShoppingItem.sources without "flour")
+
+[<Fact>]
+let ``two recipes of the same name count once`` () =
+    let recipes = [ focaccia; focaccia ] |> List.map ingredientsOf
+    Assert.Equal<string list>([ "Focaccia" ], ShoppingItem.sources recipes "flour")
+
+[<Fact>]
+let ``a nameless line comes from nowhere`` () =
+    Assert.Equal<string list>([], ShoppingItem.sources ([ focaccia ] |> List.map ingredientsOf) "  ")
+
+[<Fact>]
+let ``the recipes read as a parenthesis after the line`` () =
+    Assert.Equal("", ShoppingItem.sourceText [])
+    Assert.Equal("(Focaccia)", ShoppingItem.sourceText [ "Focaccia" ])
+    Assert.Equal("(Focaccia, Pizza)", ShoppingItem.sourceText [ "Focaccia"; "Pizza" ])

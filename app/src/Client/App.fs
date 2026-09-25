@@ -1182,8 +1182,10 @@ module private Press =
 /// A shopping-list row: a tap anywhere on it (text or box) checks it, a
 /// long press turns the text into a field for editing it. The box is only
 /// drawn for the pointer - the row handles the gesture - but still takes
-/// the keyboard. `editing` is the text typed so far while editing.
-let private itemRow (id: string) (text: string) (isDone: bool) (editing: string option) (onDone: bool -> unit) dispatch =
+/// the keyboard. `editing` is the text typed so far while editing. `source`
+/// is the recipes the item comes from, "(Focaccia)", shown beside the text
+/// and left out of it: editing changes the item, never where it came from.
+let private itemRow (id: string) (text: string) (source: string) (isDone: bool) (editing: string option) (onDone: bool -> unit) dispatch =
     let field = $"edit-{id}"
 
     Html.li
@@ -1240,7 +1242,15 @@ let private itemRow (id: string) (text: string) (isDone: bool) (editing: string 
                             | None ->
                                 Html.span
                                     [ prop.className (if isDone then "text-gray-400 line-through" else "")
-                                      prop.text text ] ] ] ] ]
+                                      prop.text text ]
+
+                                if source <> "" then
+                                    Html.span
+                                        [ prop.className (
+                                              "min-w-0 truncate text-sm "
+                                              + (if isDone then "text-gray-300" else "text-gray-400")
+                                          )
+                                          prop.text source ] ] ] ] ]
 
 let private shoppingListPage (model: Model) dispatch =
     let list = currentList model
@@ -1253,6 +1263,13 @@ let private shoppingListPage (model: Model) dispatch =
     // Unchecked items, then the blank row, then what's already checked.
     let todo, ``done`` = items |> List.partition (fun i -> i.``done`` = 0)
 
+    // Every recipe with the ingredients its Cooklang names, newest first: what
+    // an item's "(Focaccia)" is read off, freshly on every render, so editing a
+    // recipe moves the labels with it.
+    let recipeIngredients =
+        model.Recipes
+        |> List.map (fun r -> r.title, ingredientsOf r |> List.map (fun i -> i.Name))
+
     let row (item: ShoppingItem) =
         let editing =
             match model.EditingItem with
@@ -1262,6 +1279,7 @@ let private shoppingListPage (model: Model) dispatch =
         itemRow
             item.id
             (Shared.ShoppingItem.text item.quantity item.unit item.name)
+            (Shared.ShoppingItem.sources recipeIngredients item.name |> Shared.ShoppingItem.sourceText)
             (item.``done`` <> 0)
             editing
             (fun isDone -> dispatch (SetShoppingItemDone(item.id, isDone)))

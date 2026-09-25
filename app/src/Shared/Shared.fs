@@ -43,6 +43,31 @@ module ShoppingItem =
         else
             "", "", edited
 
+    /// The recipes an item comes from: the ones whose Cooklang names an
+    /// ingredient by that name, matched the way adding merges rows
+    /// (case-insensitive, trimmed). `recipes` is each title with the
+    /// ingredient names its body parses to. Nothing is stored, so taking
+    /// `@flour{}` out of a recipe leaves the item on the list and only drops
+    /// the recipe from it, and an item typed by hand picks a recipe up as
+    /// soon as one calls for it.
+    let sources (recipes: (string * string list) list) (name: string) =
+        let key (s: string) = s.Trim().ToLowerInvariant()
+        let name = key name
+
+        if name = "" then
+            []
+        else
+            recipes
+            |> List.filter (fun (_, ingredients) -> ingredients |> List.exists (fun i -> key i = name))
+            |> List.map fst
+            |> List.distinct
+
+    /// How those recipes read after the line: "(Focaccia)", "(Focaccia, Pizza)".
+    let sourceText (titles: string list) =
+        match titles with
+        | [] -> ""
+        | titles -> "(" + String.concat ", " titles + ")"
+
 /// A menu is a shopping list's twin for recipes: a name, and the recipes
 /// added to it. Adding goes into the newest one, created on first use and
 /// named after today plus two random words ("M-0920-silly-fiddle") so two

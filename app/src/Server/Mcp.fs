@@ -40,7 +40,12 @@ type ShoppingItem =
       Name: string
       Quantity: string
       Unit: string
-      Done: bool }
+      Done: bool
+      /// The recipes this ingredient comes from, as the page shows after the
+      /// line: the titles of the recipes whose Cooklang still names it.
+      /// Derived, never stored, so it empties when the last recipe calling
+      /// for it stops doing so, and the item stays on the list.
+      Recipes: string list }
 
 /// Sides on the current menu with the same name, as one line: "2 × green
 /// beans". Checking it checks every side in the group.
@@ -92,12 +97,15 @@ let private recipe (r: Db.RecipeRow) =
       Body = r.Body
       CreatedAt = r.CreatedAt }
 
-let private item (i: Db.ShoppingItemRow) =
+/// `recipeIngredients` is each recipe's title with the ingredient names its
+/// body parses to, which is what `Recipes` is read off.
+let private item recipeIngredients (i: Db.ShoppingItemRow) =
     { Id = string i.Id
       Name = i.Name
       Quantity = i.Quantity
       Unit = i.Unit
-      Done = i.Done }
+      Done = i.Done
+      Recipes = Shared.ShoppingItem.sources recipeIngredients i.Name }
 
 let private side (s: Db.MenuSideRow) : MenuSide =
     { Id = string s.Id
@@ -167,6 +175,19 @@ type PantryTools(config: Config, http: IHttpContextAccessor) =
             match menu with
             | Some m -> return m.Id
             | None -> return! Db.insertMenu cs user.Id (Shared.Menu.defaultName DateTime.Now (Random()))
+        }
+
+    /// Every recipe's title with the ingredient names its Cooklang parses to:
+    /// what an item's `Recipes` is read off, the way the page derives it.
+    /// Empty without `recipes:read`, since the titles are recipe data; the
+    /// items themselves still come back.
+    let recipeIngredients () =
+        task {
+            if not (Set.contains "recipes:read" scopes) then
+                return []
+            else
+                let! rows = Db.listRecipes cs user.Id
+                return rows |> List.map (fun r -> r.Title, ingredientsOf r.Body |> List.map (fun i -> i.Name))
         }
 
     /// The current menu's sides, for the shopping list. Empty with no menu.
@@ -244,7 +265,7 @@ type PantryTools(config: Config, http: IHttpContextAccessor) =
         }
 
     [<McpServerTool(Name = "get_shopping_list");
-      Description("The current shopping list (the newest un-archived one) and its items, unchecked first, plus the current menu's sides grouped by name. id and name are null until something has been added.")>]
+      Description("The current shopping list (the newest un-archived one) and its items, unchecked first, plus the current menu's sides grouped by name. Each item's recipes are the recipes whose Cooklang still names that ingredient. id and name are null until something has been added.")>]
     member _.GetShoppingList() : Task<ShoppingList> =
         task {
             require "shopping:read"
@@ -260,11 +281,12 @@ type PantryTools(config: Config, http: IHttpContextAccessor) =
                       MenuSides = sideGroups sides }
             | Some l ->
                 let! rows = Db.listShoppingItems cs user.Id l.Id
+                let! recipes = recipeIngredients ()
 
                 return
                     { Id = string l.Id
                       Name = l.Name
-                      Items = List.map item rows
+                      Items = rows |> List.map (item recipes)
                       MenuSides = sideGroups sides }
         }
 
@@ -283,7 +305,8 @@ type PantryTools(config: Config, http: IHttpContextAccessor) =
                     (items |> List.map (fun i -> i.Name, (i.Quantity |> Option.ofObj |> Option.defaultValue ""), (i.Unit |> Option.ofObj |> Option.defaultValue "")))
 
             let! rows = Db.listShoppingItems cs user.Id listId
-            return rows |> List.filter (fun r -> List.contains r.Id ids) |> List.map item
+            let! recipes = recipeIngredients ()
+            return rows |> List.filter (fun r -> List.contains r.Id ids) |> List.map (item recipes)
         }
 
     [<McpServerTool(Name = "set_shopping_item_done"); Description("Check an item off (or un-check it).")>]
