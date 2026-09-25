@@ -61,8 +61,9 @@ type DetailTab =
 
 /// A short message at the bottom of the screen. `Seq` lets a hide scheduled
 /// for an earlier toast leave a newer one alone; `Leaving` keeps it mounted
-/// while the exit animation plays.
-type Toast = { Seq: int; Text: string; Leaving: bool }
+/// while the exit animation plays. `Undo` is the shopping item a tap on the
+/// toast un-checks, and is what makes the toast an "Undo" to tap at all.
+type Toast = { Seq: int; Text: string; Leaving: bool; Undo: string option }
 
 /// What "Archive" puts away: the current shopping list or the current menu.
 /// Archiving is how a new one starts; the next add creates it.
@@ -214,10 +215,25 @@ let private after (ms: int) (msg: Msg) =
 /// How long the toast's enter/exit animations run (index.css).
 let private toastAnimationMs = 150
 
-/// Shows `text` for a couple of seconds.
-let private toast (text: string) (model: Model) =
+/// Shows a toast for a couple of seconds - twice that when there is an Undo
+/// on it, since a tap target has to be reached before it goes.
+let private toastWith (undo: string option) (text: string) (model: Model) =
     let seq = (model.Toast |> Option.map (fun t -> t.Seq) |> Option.defaultValue 0) + 1
-    { model with Toast = Some { Seq = seq; Text = text; Leaving = false } }, after 2000 (HideToast seq)
+
+    { model with Toast = Some { Seq = seq; Text = text; Leaving = false; Undo = undo } },
+    after (if undo.IsSome then 4000 else 2000) (HideToast seq)
+
+/// Shows `text` for a couple of seconds.
+let private toast (text: string) (model: Model) = toastWith None text model
+
+/// The toast a checked-off item raises: nothing but "Undo".
+let private undoToast (itemId: string) (model: Model) = toastWith (Some itemId) "" model
+
+/// Starts the toast's exit, if there is one; otherwise nothing to do.
+let private dismissToast (model: Model) =
+    match model.Toast with
+    | Some t when not t.Leaving -> { model with Toast = Some { t with Leaving = true } }, after toastAnimationMs (RemoveToast t.Seq)
+    | _ -> model, Cmd.none
 
 let private fireAndForget (work: JS.Promise<'a>) =
     Cmd.OfPromise.either (fun () -> work) () (fun _ -> Ignore) (fun err ->
@@ -468,7 +484,22 @@ let update msg model =
             |> List.map (fun i -> if i.id = id then { i with ``done`` = (if isDone then 1 else 0) } else i)
             |> List.sortBy (fun i -> i.``done``, i.created_at, i.id)
 
-        { model with ShoppingItems = items }, fireAndForget (Db.setShoppingItemDone id isDone)
+        let model = { model with ShoppingItems = items }
+        let save = fireAndForget (Db.setShoppingItemDone id isDone)
+
+        if isDone then
+            // Checking something off can be taken back for a moment.
+            let model, showToast = undoToast id model
+            model, Cmd.batch [ save; showToast ]
+        else
+            // Un-checking it - by the Undo itself, or by tapping the row again -
+            // leaves that toast with nothing to offer.
+            let model, hide =
+                match model.Toast with
+                | Some t when t.Undo = Some id -> dismissToast model
+                | _ -> model, Cmd.none
+
+            model, Cmd.batch [ save; hide ]
     | StartEditItem id ->
         match model.ShoppingItems |> List.tryFind (fun i -> i.id = id) with
         | Some item -> { model with EditingItem = Some(id, Shared.ShoppingItem.text item.quantity item.unit item.name) }, Cmd.none
@@ -1260,7 +1291,8 @@ let private shoppingListPage (model: Model) dispatch =
         | Some list -> model.ShoppingItems |> List.filter (fun i -> i.list_id = list.id)
         | None -> []
 
-    // Unchecked items, then the blank row, then what's already checked.
+    // Unchecked items, then the blank row, then the menu's sides, then what's
+    // already checked: everything still to buy stays above the ticked-off tail.
     let todo, ``done`` = items |> List.partition (fun i -> i.``done`` = 0)
 
     // Every recipe with the ingredients its Cooklang names, newest first: what
@@ -1311,8 +1343,7 @@ let private shoppingListPage (model: Model) dispatch =
               [ prop.className "flex flex-col gap-1"
                 prop.children
                     [ yield! List.map row todo
-                      newItemRow model.NewItem dispatch
-                      yield! List.map row ``done`` ] ]
+                      newItemRow model.NewItem dispatch ] ]
           // Sides noted on the current menu, checkable here like the items
           // above. They live with the menu and are archived with it.
           match sideGroups (currentMenuSides model) with
@@ -1338,7 +1369,12 @@ let private shoppingListPage (model: Model) dispatch =
                                                           match g.Ids.Length with
                                                           | 1 -> g.Name
                                                           | n -> $"{n} × {g.Name}"
-                                                      ) ] ] ] ] ] ] ]
+                                                      ) ] ] ] ] ] ]
+          // The ticked-off tail, last. `mt-1` stands in for the gap it used to
+          // sit in when it was part of the list above.
+          match ``done`` with
+          | [] -> Html.none
+          | items -> Html.ul [ prop.className "mt-1 flex flex-col gap-1"; prop.children (List.map row items) ] ]
 
 /// The blank row under a menu entry. Same manners as the shopping list's
 /// (Enter adds and keeps focus; tapping away adds too), without a checkbox.
@@ -1564,10 +1600,24 @@ let View () =
                                   [ prop.key t.Seq
                                     prop.className (
                                         (if t.Leaving then "toast-out" else "toast-in")
-                                        + " bg-ink px-3 py-2 text-sm text-white shadow-lg"
+                                        + " flex items-center gap-3 bg-ink px-3 py-2 text-sm text-white shadow-lg"
+                                        // Only a toast with an Undo on it takes taps;
+                                        // the rest let them through to the page.
+                                        + (if t.Undo.IsSome then " pointer-events-auto" else "")
                                     )
                                     prop.role "status"
-                                    prop.text t.Text ]
+                                    prop.children
+                                        [ if t.Text <> "" then
+                                              Html.span [ prop.text t.Text ]
+
+                                          match t.Undo with
+                                          | Some itemId ->
+                                              Html.button
+                                                  [ prop.type' "button"
+                                                    prop.className "font-semibold text-brand"
+                                                    prop.text "Undo"
+                                                    prop.onClick (fun _ -> dispatch (SetShoppingItemDone(itemId, false))) ]
+                                          | None -> Html.none ] ]
                           | None -> Html.none ] ] ]
 
 let root = ReactDOM.createRoot (document.getElementById "root")
