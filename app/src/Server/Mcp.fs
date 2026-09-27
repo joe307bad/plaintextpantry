@@ -33,7 +33,15 @@ type Recipe =
       Title: string
       /// Cooklang source: `@ingredient{qty%unit}`, `#cookware{}`, `~{time}`.
       Body: string
+      /// The names of the tags on it, as the badges beside it read.
+      Tags: string list
       CreatedAt: DateTimeOffset }
+
+/// A tag, with how many recipes carry it.
+type Tag =
+    { Id: string
+      Name: string
+      Recipes: int }
 
 type ShoppingItem =
     { Id: string
@@ -91,11 +99,17 @@ type NewShoppingItem =
       Quantity: string
       Unit: string }
 
-let private recipe (r: Db.RecipeRow) =
+let private recipe (tags: string list) (r: Db.RecipeRow) =
     { Id = string r.Id
       Title = r.Title
       Body = r.Body
+      Tags = tags
       CreatedAt = r.CreatedAt }
+
+let private tag (t: Db.TagRow) =
+    { Id = string t.Id
+      Name = t.Name
+      Recipes = t.Recipes }
 
 /// `recipeIngredients` is each recipe's title with the ingredient names its
 /// body parses to, which is what `Recipes` is read off.
@@ -206,22 +220,32 @@ type PantryTools(config: Config, http: IHttpContextAccessor) =
            Name = user.Name
            Scopes = Set.toList scopes |}
 
-    [<McpServerTool(Name = "list_recipes"); Description("All of the user's recipes: id, title and full Cooklang body.")>]
+    [<McpServerTool(Name = "list_recipes"); Description("All of the user's recipes: id, title, full Cooklang body and the tags on each.")>]
     member _.ListRecipes() : Task<Recipe list> =
         task {
             require "recipes:read"
             let! rows = Db.listRecipes cs user.Id
-            return List.map recipe rows
+            let! links = Db.listRecipeTags cs user.Id
+            let byRecipe = links |> List.groupBy fst |> Map.ofList
+
+            return
+                rows
+                |> List.map (fun r ->
+                    let tags = byRecipe |> Map.tryFind r.Id |> Option.defaultValue [] |> List.map snd
+                    recipe tags r)
         }
 
     [<McpServerTool(Name = "get_recipe"); Description("One recipe by id.")>]
     member _.GetRecipe([<Description("Recipe id, from list_recipes")>] id: string) : Task<Recipe> =
         task {
             require "recipes:read"
-            let! row = Db.getRecipe cs user.Id (parseId id)
+            let gid = parseId id
+            let! row = Db.getRecipe cs user.Id gid
 
             match row with
-            | Some r -> return recipe r
+            | Some r ->
+                let! tags = Db.tagsOfRecipe cs user.Id gid
+                return recipe tags r
             | None -> return raise (McpException "No such recipe")
         }
 
@@ -234,7 +258,7 @@ type PantryTools(config: Config, http: IHttpContextAccessor) =
             require "recipes:write"
             let! id = Db.insertRecipe cs user.Id title body
             let! row = Db.getRecipe cs user.Id id
-            return recipe row.Value
+            return recipe [] row.Value
         }
 
     [<McpServerTool(Name = "update_recipe"); Description("Change a recipe's title and/or body. Omit a field to leave it unchanged.")>]
@@ -253,15 +277,83 @@ type PantryTools(config: Config, http: IHttpContextAccessor) =
                 raise (McpException "No such recipe")
 
             let! row = Db.getRecipe cs user.Id gid
-            return recipe row.Value
+            let! tags = Db.tagsOfRecipe cs user.Id gid
+            return recipe tags row.Value
         }
 
-    [<McpServerTool(Name = "delete_recipe"); Description("Delete a recipe permanently.")>]
+    [<McpServerTool(Name = "delete_recipe"); Description("Delete a recipe permanently. Its tags come off it; the tags themselves stay.")>]
     member _.DeleteRecipe([<Description("Recipe id")>] id: string) : Task<string> =
         task {
             require "recipes:write"
             let! ok = Db.deleteRecipe cs user.Id (parseId id)
             return (if ok then "Deleted." else "No such recipe.")
+        }
+
+    // --- tags ----------------------------------------------------------------
+
+    [<McpServerTool(Name = "list_tags");
+      Description("Every tag the user has, with how many recipes carry each. Tags are free text and belong to the user, not to one recipe; two names differing only in case or surrounding space are the same tag.")>]
+    member _.ListTags() : Task<Tag list> =
+        task {
+            require "recipes:read"
+            let! rows = Db.listTags cs user.Id
+            return List.map tag rows
+        }
+
+    [<McpServerTool(Name = "add_recipe_tags");
+      Description("Put tags on a recipe, making a tag of any name that isn't one yet. A name the recipe already carries, in any casing, is left alone. Returns the recipe's tags afterwards.")>]
+    member _.AddRecipeTags
+        ([<Description("Recipe id, from list_recipes")>] recipeId: string, [<Description("Tag names")>] names: string list)
+        : Task<string list> =
+        task {
+            require "recipes:write"
+            let rid = parseId recipeId
+            let names = names |> List.map Shared.Tag.clean |> List.filter ((<>) "")
+            let! ok = Db.insertRecipeTags cs user.Id rid names
+
+            if not ok then
+                raise (McpException "No such recipe")
+
+            return! Db.tagsOfRecipe cs user.Id rid
+        }
+
+    [<McpServerTool(Name = "remove_recipe_tag");
+      Description("Take one tag off a recipe. The tag itself stays, on whatever other recipes carry it; delete_tag is what gets rid of it.")>]
+    member _.RemoveRecipeTag
+        ([<Description("Recipe id")>] recipeId: string, [<Description("Tag name")>] name: string)
+        : Task<string> =
+        task {
+            require "recipes:write"
+            let! ok = Db.deleteRecipeTag cs user.Id (parseId recipeId) (Shared.Tag.clean name)
+            return (if ok then "Removed." else "That recipe doesn't have that tag.")
+        }
+
+    [<McpServerTool(Name = "rename_tag");
+      Description("Rename a tag everywhere at once - recipes carry its id, not its name. Refused when another tag already goes by that name, since the app would treat the two as one tag.")>]
+    member _.RenameTag
+        ([<Description("Tag id, from list_tags")>] id: string, [<Description("New name")>] name: string)
+        : Task<string> =
+        task {
+            require "recipes:write"
+            let name = Shared.Tag.clean name
+
+            if name = "" then
+                raise (McpException "A tag needs a name")
+
+            let! result = Db.renameTag cs user.Id (parseId id) name
+
+            match result with
+            | Db.Renamed -> return $"Renamed to \"{name}\"."
+            | Db.TagNotFound -> return "No such tag."
+            | Db.NameTaken other -> return raise (McpException $"There is already a tag called \"{other}\"")
+        }
+
+    [<McpServerTool(Name = "delete_tag"); Description("Delete a tag for good, taking it off every recipe that carries it. The recipes themselves are untouched.")>]
+    member _.DeleteTag([<Description("Tag id, from list_tags")>] id: string) : Task<string> =
+        task {
+            require "recipes:write"
+            let! ok = Db.deleteTag cs user.Id (parseId id)
+            return (if ok then "Deleted." else "No such tag.")
         }
 
     [<McpServerTool(Name = "get_shopping_list");

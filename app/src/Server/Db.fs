@@ -25,7 +25,9 @@ let private tables =
           "menus", [ "name", "text"; "created_at", "timestamptz"; "archived_at", "timestamptz" ]
           "menu_recipes", [ "menu_id", "uuid"; "recipe_id", "uuid"; "created_at", "timestamptz" ]
           "menu_sides",
-          [ "menu_recipe_id", "uuid"; "name", "text"; "done", "integer"; "created_at", "timestamptz" ] ]
+          [ "menu_recipe_id", "uuid"; "name", "text"; "done", "integer"; "created_at", "timestamptz" ]
+          "tags", [ "name", "text"; "created_at", "timestamptz" ]
+          "recipe_tags", [ "recipe_id", "uuid"; "tag_id", "uuid"; "created_at", "timestamptz" ] ]
 
 let private param (cmd: NpgsqlCommand) (name: string) (value: string option) =
     let v : obj =
@@ -222,7 +224,8 @@ let updateRecipe cs (userId: string) (id: Guid) (title: string option) (body: st
             return n = 1
         })
 
-/// Also drops the recipe, and the sides under it, from any menu it was on.
+/// Also drops the recipe, and the sides under it, from any menu it was on,
+/// and takes its tags off it (the tags themselves stay).
 let deleteRecipe cs (userId: string) (id: Guid) =
     withConn cs (fun conn ->
         task {
@@ -230,6 +233,11 @@ let deleteRecipe cs (userId: string) (id: Guid) =
             let! n = cmd.ExecuteNonQueryAsync()
 
             if n = 1 then
+                use tags =
+                    command conn "DELETE FROM recipe_tags WHERE recipe_id = @id AND user_id = @u" [ "id", id; "u", userId ]
+
+                let! _ = tags.ExecuteNonQueryAsync()
+
                 use sides =
                     command
                         conn
@@ -523,6 +531,165 @@ let deleteMenuSide cs (userId: string) (id: Guid) =
     withConn cs (fun conn ->
         task {
             use cmd = command conn "DELETE FROM menu_sides WHERE id = @id AND user_id = @u" [ "id", id; "u", userId ]
+            let! n = cmd.ExecuteNonQueryAsync()
+            return n = 1
+        })
+
+// ---------------------------------------------------------------------------
+// Tags
+// ---------------------------------------------------------------------------
+
+/// A tag with how many recipes carry it.
+type TagRow =
+    { Id: Guid
+      Name: string
+      Recipes: int
+      CreatedAt: DateTimeOffset }
+
+/// What a rename did. `Taken` is how two tags are kept from going by one
+/// name, which is all the app would treat them as (`Shared.Tag.key`).
+type RenameResult =
+    | Renamed
+    | TagNotFound
+    | NameTaken of string
+
+let private tagOf (r: Data.Common.DbDataReader) : TagRow =
+    { Id = r.GetGuid 0
+      Name = r.GetString 1
+      Recipes = r.GetInt32 2
+      CreatedAt = r.GetFieldValue<DateTimeOffset> 3 }
+
+/// Tags are matched by name the way the client matches them, ignoring case
+/// and surrounding space, and shown in that same order.
+let listTags cs (userId: string) =
+    withConn cs (fun conn ->
+        readAll
+            (command
+                conn
+                "SELECT t.id, t.name, (SELECT count(*) FROM recipe_tags rt WHERE rt.tag_id = t.id)::int, t.created_at FROM tags t WHERE t.user_id = @u ORDER BY lower(t.name), t.id"
+                [ "u", userId ])
+            tagOf)
+
+/// Every tag on every recipe, as (recipe id, tag name).
+let listRecipeTags cs (userId: string) =
+    withConn cs (fun conn ->
+        readAll
+            (command
+                conn
+                "SELECT rt.recipe_id, t.name FROM recipe_tags rt JOIN tags t ON t.id = rt.tag_id WHERE rt.user_id = @u ORDER BY lower(t.name), t.id"
+                [ "u", userId ])
+            (fun r -> r.GetGuid 0, r.GetString 1))
+
+/// One recipe's tags, in the order they are shown.
+let tagsOfRecipe cs (userId: string) (recipeId: Guid) =
+    withConn cs (fun conn ->
+        readAll
+            (command
+                conn
+                "SELECT t.name FROM recipe_tags rt JOIN tags t ON t.id = rt.tag_id WHERE rt.user_id = @u AND rt.recipe_id = @r ORDER BY lower(t.name), t.id"
+                [ "u", userId; "r", recipeId ])
+            (fun r -> r.GetString 0))
+
+/// Puts tags on a recipe, making a tag of any name that isn't one yet - the
+/// same thing typing a name into the Tags tab does. A name the recipe
+/// already carries is left alone. False when the recipe isn't the user's.
+let insertRecipeTags cs (userId: string) (recipeId: Guid) (names: string list) =
+    withConn cs (fun conn ->
+        task {
+            use owns = command conn "SELECT 1 FROM recipes WHERE id = @id AND user_id = @u" [ "id", recipeId; "u", userId ]
+            let! found = owns.ExecuteScalarAsync()
+
+            if isNull found then
+                return false
+            else
+                use! tx = conn.BeginTransactionAsync()
+
+                for name in names do
+                    let! tagId =
+                        task {
+                            use find =
+                                command
+                                    conn
+                                    "SELECT id FROM tags WHERE user_id = @u AND lower(name) = lower(@n)"
+                                    [ "u", userId; "n", name ]
+
+                            find.Transaction <- tx
+                            let! existing = find.ExecuteScalarAsync()
+
+                            match existing with
+                            | null ->
+                                let id = Guid.NewGuid()
+
+                                use insert =
+                                    command
+                                        conn
+                                        "INSERT INTO tags (id, user_id, name) VALUES (@id, @u, @n)"
+                                        [ "id", id; "u", userId; "n", name ]
+
+                                insert.Transaction <- tx
+                                let! _ = insert.ExecuteNonQueryAsync()
+                                return id
+                            | id -> return (id :?> Guid)
+                        }
+
+                    use link =
+                        command
+                            conn
+                            "INSERT INTO recipe_tags (id, user_id, recipe_id, tag_id) SELECT @id, @u, @r, @t WHERE NOT EXISTS (SELECT 1 FROM recipe_tags WHERE recipe_id = @r AND tag_id = @t)"
+                            [ "id", Guid.NewGuid(); "u", userId; "r", recipeId; "t", tagId ]
+
+                    link.Transaction <- tx
+                    let! _ = link.ExecuteNonQueryAsync()
+                    ()
+
+                do! tx.CommitAsync()
+                return true
+        })
+
+/// Takes a tag off one recipe by name; the tag itself stays. False when the
+/// recipe doesn't carry it.
+let deleteRecipeTag cs (userId: string) (recipeId: Guid) (name: string) =
+    withConn cs (fun conn ->
+        task {
+            use cmd =
+                command
+                    conn
+                    "DELETE FROM recipe_tags rt USING tags t WHERE t.id = rt.tag_id AND rt.user_id = @u AND rt.recipe_id = @r AND lower(t.name) = lower(@n)"
+                    [ "u", userId; "r", recipeId; "n", name ]
+
+            let! n = cmd.ExecuteNonQueryAsync()
+            return n > 0
+        })
+
+/// Renames the tag everywhere at once: recipes carry its id, not its name.
+let renameTag cs (userId: string) (id: Guid) (name: string) =
+    withConn cs (fun conn ->
+        task {
+            use clash =
+                command
+                    conn
+                    "SELECT name FROM tags WHERE user_id = @u AND lower(name) = lower(@n) AND id <> @id"
+                    [ "u", userId; "n", name; "id", id ]
+
+            let! other = clash.ExecuteScalarAsync()
+
+            match other with
+            | null ->
+                use cmd =
+                    command conn "UPDATE tags SET name = @n WHERE id = @id AND user_id = @u" [ "n", name; "id", id; "u", userId ]
+
+                let! n = cmd.ExecuteNonQueryAsync()
+                return (if n = 1 then Renamed else TagNotFound)
+            | taken -> return NameTaken(string taken)
+        })
+
+/// Deletes the tag and takes it off every recipe.
+let deleteTag cs (userId: string) (id: Guid) =
+    withConn cs (fun conn ->
+        task {
+            use links = command conn "DELETE FROM recipe_tags WHERE tag_id = @id AND user_id = @u" [ "id", id; "u", userId ]
+            let! _ = links.ExecuteNonQueryAsync()
+            use cmd = command conn "DELETE FROM tags WHERE id = @id AND user_id = @u" [ "id", id; "u", userId ]
             let! n = cmd.ExecuteNonQueryAsync()
             return n = 1
         })

@@ -87,6 +87,27 @@ module Menu =
         let pick (words: string[]) = words.[random.Next words.Length]
         sprintf "M-%02d%02d-%s-%s" date.Month date.Day (pick adjectives) (pick nouns)
 
+/// A tag is a name a user gives recipes ("quick", "Kaitlyn's fav"), stored
+/// once and joined to each recipe it is on. Names are free text, kept as
+/// typed, but two that differ only in case or surrounding space are the same
+/// tag: typing "Quick" on a second recipe puts it on the existing "quick".
+module Tag =
+    /// The name as it is stored: as typed, without the surrounding space.
+    let clean (name: string) = name.Trim()
+
+    /// What two names are compared by to decide they are the same tag.
+    let key (name: string) = (clean name).ToLowerInvariant()
+
+    /// The one of `tags` a typed name stands for, if any. `name` reads the
+    /// name off a tag, so this works on whatever shape holds them.
+    let find (name: 'tag -> string) (typed: string) (tags: 'tag list) =
+        tags |> List.tryFind (fun t -> key (name t) = key typed)
+
+    /// Tags in the order they are shown: by name, ignoring case. They are
+    /// stored in the order they were made, which says nothing about how
+    /// they read as a row of badges.
+    let sorted (name: 'tag -> string) (tags: 'tag list) = tags |> List.sortBy (name >> key)
+
 /// One entry from the PowerSync client upload queue, in the shape the
 /// server applies to Postgres. Values are strings (or null); Postgres
 /// casts them to the real column types.

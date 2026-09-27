@@ -111,8 +111,8 @@ done
 SCOPES="recipes:read recipes:write shopping:read shopping:write menus:read menus:write mcp"
 scope_text() {
   case "$1" in
-    recipes:read)   echo "Read your recipes" ;;
-    recipes:write)  echo "Create, edit and delete your recipes" ;;
+    recipes:read)   echo "Read your recipes and tags" ;;
+    recipes:write)  echo "Create, edit and delete your recipes and tags" ;;
     shopping:read)  echo "Read your shopping list" ;;
     shopping:write) echo "Add to, check off and archive your shopping list" ;;
     menus:read)     echo "Read your menu" ;;

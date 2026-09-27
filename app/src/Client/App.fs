@@ -53,11 +53,12 @@ let private isPublic page =
 /// Editable recipe fields, used by both the "New Recipe" modal and the detail page.
 type RecipeForm = { Title: string; Body: string }
 
-/// The two views of a recipe on its page: the steps as written up, or the
-/// Cooklang they come from.
+/// The views of a recipe on its page: the steps as written up, the Cooklang
+/// they come from, or the tags on it.
 type DetailTab =
     | RecipeTab
     | CooklangTab
+    | TagsTab
 
 /// A short message at the bottom of the screen. `Seq` lets a hide scheduled
 /// for an earlier toast leave a newer one alone; `Leaving` keeps it mounted
@@ -115,6 +116,19 @@ type Model =
       MenuRecipes: MenuRecipe list
       /// Every entry's sides.
       MenuSides: MenuSide list
+      /// Every tag the user has, in the order they were made.
+      Tags: Tag list
+      /// Which tags are on which recipes.
+      RecipeTags: RecipeTag list
+      /// The tag the recipe list is filtered by, if any.
+      TagFilter: string option
+      /// The blank "Add a tag" row on a recipe's Tags tab.
+      NewTag: string
+      /// The tag being renamed (after a long press), and its name as typed
+      /// so far.
+      EditingTag: (string * string) option
+      /// Tag awaiting confirmation to be deleted for good.
+      PendingTagDelete: string option
       /// The blank "Add a side" row under each menu entry, by entry id.
       NewSides: Map<string, string>
       /// `Some` while the "New Recipe" modal is open.
@@ -164,6 +178,21 @@ type Msg =
     | ConfirmMenuRemove of id: string
     | CancelMenuRemove
     | RemoveFromMenu of id: string
+    | TagsChanged of Tag list
+    | RecipeTagsChanged of RecipeTag list
+    | NewTagChanged of string
+    /// Adds what is in the blank row: a new tag, or one that already exists.
+    | AddTag of recipeId: string
+    | ToggleTag of recipeId: string * tagId: string
+    | StartEditTag of id: string
+    | EditTagChanged of string
+    | SaveEditTag
+    | CancelEditTag
+    | ConfirmTagDelete of id: string
+    | CancelTagDelete
+    | DeleteTag of id: string
+    /// `None` shows every recipe again.
+    | FilterByTag of tagId: string option
     | AddToShoppingList of recipeId: string
     /// Add even though every ingredient is already on the list.
     | AddToShoppingListAnyway of recipeId: string
@@ -251,6 +280,12 @@ let init () =
       MenuRecipes = []
       MenuSides = []
       NewSides = Map.empty
+      Tags = []
+      RecipeTags = []
+      TagFilter = None
+      NewTag = ""
+      EditingTag = None
+      PendingTagDelete = None
       NewRecipe = None
       Edit = None
       DetailTab = RecipeTab
@@ -279,6 +314,8 @@ let private startSync () =
           Cmd.ofEffect (fun dispatch -> Db.watchMenus (MenusChanged >> dispatch))
           Cmd.ofEffect (fun dispatch -> Db.watchMenuRecipes (MenuRecipesChanged >> dispatch))
           Cmd.ofEffect (fun dispatch -> Db.watchMenuSides (MenuSidesChanged >> dispatch))
+          Cmd.ofEffect (fun dispatch -> Db.watchTags (TagsChanged >> dispatch))
+          Cmd.ofEffect (fun dispatch -> Db.watchRecipeTags (RecipeTagsChanged >> dispatch))
           Cmd.ofEffect (fun _ -> Db.connect () |> Promise.catch (fun e -> console.error e) |> ignore) ]
 
 let private findRecipe id (recipes: Recipe list) =
@@ -323,6 +360,36 @@ let private sideGroups (sides: MenuSide list) =
         { Name = name
           Ids = group |> List.map (fun s -> s.id)
           Done = group |> List.forall (fun s -> s.``done`` <> 0) })
+
+/// A recipe's tags, in the order they are shown.
+let private tagsOf (model: Model) (recipeId: string) =
+    let ids =
+        model.RecipeTags
+        |> List.filter (fun l -> l.recipe_id = recipeId)
+        |> List.map (fun l -> l.tag_id)
+        |> Set.ofList
+
+    model.Tags |> List.filter (fun t -> ids.Contains t.id) |> Shared.Tag.sorted (fun t -> t.name)
+
+/// The tag the recipe list is filtered by, once it is known to still exist:
+/// a tag deleted on another device leaves the filter pointing at nothing,
+/// and that should show every recipe, not none.
+let private activeTag (model: Model) =
+    model.TagFilter |> Option.filter (fun id -> model.Tags |> List.exists (fun t -> t.id = id))
+
+/// The recipes the list page shows: all of them, or the ones carrying the
+/// tag being filtered by.
+let private shownRecipes (model: Model) =
+    match activeTag model with
+    | None -> model.Recipes
+    | Some tagId ->
+        let tagged =
+            model.RecipeTags
+            |> List.filter (fun l -> l.tag_id = tagId)
+            |> List.map (fun l -> l.recipe_id)
+            |> Set.ofList
+
+        model.Recipes |> List.filter (fun r -> tagged.Contains r.id)
 
 type private Quantity = Cooklang.Quantity
 
@@ -377,7 +444,14 @@ let update msg model =
             | RecipeDetail id -> findRecipe id model.Recipes |> Option.map formOf
             | _ -> None
 
-        { model with Page = page; Edit = edit; DetailTab = RecipeTab; MenuOpen = false }, Cmd.none
+        { model with
+            Page = page
+            Edit = edit
+            DetailTab = RecipeTab
+            NewTag = ""
+            EditingTag = None
+            MenuOpen = false },
+        Cmd.none
     | RecipesChanged recipes ->
         // Populate the detail form once the recipe arrives; never clobber an in-progress edit.
         let edit =
@@ -391,6 +465,63 @@ let update msg model =
     | MenusChanged menus -> { model with Menus = menus }, Cmd.none
     | MenuRecipesChanged entries -> { model with MenuRecipes = entries }, Cmd.none
     | MenuSidesChanged sides -> { model with MenuSides = sides }, Cmd.none
+    | TagsChanged tags -> { model with Tags = tags }, Cmd.none
+    | RecipeTagsChanged links -> { model with RecipeTags = links }, Cmd.none
+    | NewTagChanged text -> { model with NewTag = text }, Cmd.none
+    | AddTag recipeId ->
+        let tags, links, plan = Db.planTagAdd model.Tags model.RecipeTags recipeId model.NewTag
+
+        { model with Tags = tags; RecipeTags = links; NewTag = "" },
+        Cmd.batch [ fireAndForget (Db.addTag plan); forgetTyping ]
+    | ToggleTag(recipeId, tagId) ->
+        match model.RecipeTags |> List.tryFind (fun l -> l.recipe_id = recipeId && l.tag_id = tagId) with
+        | Some link ->
+            { model with RecipeTags = model.RecipeTags |> List.filter (fun l -> l.id <> link.id) },
+            fireAndForget (Db.removeRecipeTag link.id)
+        | None ->
+            let link = Db.newRecipeTag recipeId tagId
+            { model with RecipeTags = model.RecipeTags @ [ link ] }, fireAndForget (Db.addRecipeTag link)
+    | StartEditTag id ->
+        match model.Tags |> List.tryFind (fun t -> t.id = id) with
+        | Some tag -> { model with EditingTag = Some(id, tag.name) }, Cmd.none
+        | None -> model, Cmd.none
+    | EditTagChanged text ->
+        match model.EditingTag with
+        | Some(id, _) -> { model with EditingTag = Some(id, text) }, Cmd.none
+        | None -> model, Cmd.none
+    // A blank rename is a cancel, as on the shopping list; deleting is the ×.
+    | SaveEditTag ->
+        match model.EditingTag with
+        | Some(id, text) when Shared.Tag.clean text <> "" ->
+            let name = Shared.Tag.clean text
+            let model = { model with EditingTag = None }
+
+            match model.Tags |> List.tryFind (fun t -> t.id = id) with
+            | Some tag when tag.name <> name ->
+                match Shared.Tag.find (fun (t: Tag) -> t.name) name model.Tags with
+                // Another tag goes by that name already, and two of the same
+                // would be one tag as far as the rest of the app is concerned.
+                | Some other when other.id <> id ->
+                    let model, showToast = toast $"There is already a tag called \"{other.name}\"" model
+                    model, Cmd.batch [ showToast; forgetTyping ]
+                | _ ->
+                    { model with Tags = model.Tags |> List.map (fun t -> if t.id = id then { t with name = name } else t) },
+                    Cmd.batch [ fireAndForget (Db.renameTag id name); forgetTyping ]
+            | _ -> model, forgetTyping
+        | Some _ -> { model with EditingTag = None }, forgetTyping
+        | None -> model, Cmd.none
+    | CancelEditTag -> { model with EditingTag = None }, forgetTyping
+    | ConfirmTagDelete id -> { model with PendingTagDelete = Some id }, Cmd.none
+    | CancelTagDelete -> { model with PendingTagDelete = None }, Cmd.none
+    | DeleteTag id ->
+        { model with
+            Tags = model.Tags |> List.filter (fun t -> t.id <> id)
+            RecipeTags = model.RecipeTags |> List.filter (fun l -> l.tag_id <> id)
+            TagFilter = (if model.TagFilter = Some id then None else model.TagFilter)
+            EditingTag = None
+            PendingTagDelete = None },
+        fireAndForget (Db.deleteTag id)
+    | FilterByTag tagId -> { model with TagFilter = tagId }, Cmd.none
     | NewSideChanged(entryId, text) -> { model with NewSides = model.NewSides.Add(entryId, text) }, Cmd.none
     | AddSide entryId ->
         match model.NewSides.TryFind entryId with
@@ -592,6 +723,7 @@ let update msg model =
             Edit = None
             PendingDelete = None
             Recipes = model.Recipes |> List.filter (fun r -> r.id <> id)
+            RecipeTags = model.RecipeTags |> List.filter (fun l -> l.recipe_id <> id)
             MenuRecipes = model.MenuRecipes |> List.filter (fun e -> e.recipe_id <> id)
             MenuSides =
                 let gone =
@@ -931,6 +1063,56 @@ let private confirmModal (question: string) (action: string) (kind: Confirm) (on
 let private confirmDeleteModal (recipe: Recipe) dispatch =
     confirmModal $"Delete \"{recipe.title}\"?" "Delete" Danger CancelDelete (DeleteRecipe recipe.id) dispatch
 
+/// Deleting a tag is not about one recipe, so the question says how many it
+/// is about to come off.
+let private confirmTagDeleteModal (tag: Tag) (recipes: int) dispatch =
+    let where =
+        match recipes with
+        | 0 -> "It is on no recipes."
+        | 1 -> "It will come off 1 recipe."
+        | n -> $"It will come off {n} recipes."
+
+    confirmModal $"Delete the tag \"{tag.name}\"? {where}" "Delete" Danger CancelTagDelete (DeleteTag tag.id) dispatch
+
+/// A recipe's tags, after its title: small grey rectangles, the same sharp
+/// corners as everything else on the page.
+let private tagBadges (tags: Tag list) =
+    [ for tag in tags ->
+          Html.span
+              [ prop.key tag.id
+                prop.className "bg-gray-100 px-1.5 py-0.5 text-xs text-gray-600"
+                prop.text tag.name ] ]
+
+/// The tags across the top of the recipe list: "All", then one per tag, the
+/// one being filtered by filled in. Tapping a tag shows only the recipes
+/// carrying it; tapping it again, or "All", shows the lot. Tags are made and
+/// named on a recipe's Tags tab, so there is nothing to add here.
+let private tagFilterBar (tags: Tag list) (selected: string option) dispatch =
+    match tags with
+    | [] -> Html.none
+    | tags ->
+        // One border on both states, so the selected one doesn't change height.
+        let chip (label: string) (isActive: bool) (msg: Msg) =
+            Html.button
+                [ prop.type' "button"
+                  prop.className (
+                      "border px-2 py-0.5 text-sm "
+                      + if isActive then
+                            "border-brand bg-brand font-semibold text-white"
+                        else
+                            "border-gray-300 text-gray-700 hover:bg-gray-50"
+                  )
+                  prop.text label
+                  prop.onClick (fun _ -> dispatch msg) ]
+
+        Html.div
+            [ prop.className "mb-3 flex flex-wrap items-center gap-2"
+              prop.children
+                  [ chip "All" selected.IsNone (FilterByTag None)
+                    for tag in Shared.Tag.sorted (fun (t: Tag) -> t.name) tags do
+                        let isActive = (selected = Some tag.id)
+                        chip tag.name isActive (FilterByTag(if isActive then None else Some tag.id)) ] ]
+
 let private listPage (model: Model) (known: CooklangEditor.KnownNames) dispatch =
     Html.div
         [ Html.button
@@ -938,7 +1120,9 @@ let private listPage (model: Model) (known: CooklangEditor.KnownNames) dispatch 
                 prop.className "mb-3 bg-brand px-3 py-1 font-semibold text-white hover:shadow-md hover:shadow-brand/30"
                 prop.text "New Recipe"
                 prop.onClick (fun _ -> dispatch OpenNewRecipe) ]
-          match model.Recipes with
+          tagFilterBar model.Tags (activeTag model) dispatch
+          match shownRecipes model with
+          | [] when not model.Recipes.IsEmpty -> Html.p "No recipes with that tag."
           | [] -> Html.p "No recipes yet."
           | recipes ->
               Html.ul
@@ -947,7 +1131,9 @@ let private listPage (model: Model) (known: CooklangEditor.KnownNames) dispatch 
                         [ for r in recipes ->
                               Html.li
                                   [ prop.key r.id
-                                    prop.className "flex items-center gap-2"
+                                    // Wraps, so a recipe with a few tags on it
+                                    // takes a second line instead of overflowing.
+                                    prop.className "flex flex-wrap items-center gap-2"
                                     prop.children
                                         [ // Same box as the number on the menu page, so the
                                           // + here and the × there share a column.
@@ -963,7 +1149,8 @@ let private listPage (model: Model) (known: CooklangEditor.KnownNames) dispatch 
                                                 prop.title "Add to menu"
                                                 prop.text "+"
                                                 prop.onClick (fun _ -> dispatch (AddToMenu r.id)) ]
-                                          linkWith "text-blue-600 underline hover:text-blue-800" dispatch [ "recipe"; r.id ] r.title ] ] ] ]
+                                          linkWith "text-blue-600 underline hover:text-blue-800" dispatch [ "recipe"; r.id ] r.title
+                                          yield! tagBadges (tagsOf model r.id) ] ] ] ]
           match model.NewRecipe with
           | Some recipe -> newRecipeModal recipe known dispatch
           | None -> Html.none ]
@@ -1037,12 +1224,68 @@ let private stepsView (body: string) =
                         | Cooklang.Block.Note note ->
                             Html.p [ prop.className "ml-8 text-sm text-gray-500 italic"; prop.text note ] ] ]
 
+/// Tap or long press on a list row. One press is in flight at a time: from
+/// pointer-down it is `Pending`; if the finger stays put for `holdMs` it
+/// becomes `Held` and the row goes into editing; lifting before that is a
+/// tap; moving (a scroll) or the browser cancelling it drops it.
+module private Press =
+    type State =
+        | Idle
+        | Pending of timer: float * x: float * y: float
+        | Held
+
+    /// How a press ended: lifted in time, lifted after the hold, or there
+    /// was no press on (a lift after a scroll cancelled it, or in a field).
+    type Ended =
+        | Tap
+        | LongPress
+        | NoPress
+
+    let private holdMs = 500
+    let private slop = 10.0
+    let mutable private state = Idle
+
+    let cancel () =
+        match state with
+        | Pending(timer, _, _) -> window.clearTimeout timer
+        | _ -> ()
+
+        state <- Idle
+
+    let start (e: Browser.Types.PointerEvent) (onHeld: unit -> unit) =
+        cancel ()
+
+        let timer =
+            window.setTimeout (
+                (fun () ->
+                    state <- Held
+                    onHeld ()),
+                holdMs
+            )
+
+        state <- Pending(timer, e.clientX, e.clientY)
+
+    let move (e: Browser.Types.PointerEvent) =
+        match state with
+        | Pending(_, x, y) when abs (e.clientX - x) > slop || abs (e.clientY - y) > slop -> cancel ()
+        | _ -> ()
+
+    /// What the press that just ended was, and puts things back to rest.
+    let finish () =
+        let ended = state
+        cancel ()
+
+        match ended with
+        | Pending _ -> Tap
+        | Held -> LongPress
+        | Idle -> NoPress
+
 let private detailTabs (current: DetailTab) dispatch =
     Html.div
         [ prop.className "flex shrink-0 gap-4 border-b border-gray-200"
           prop.role "tablist"
           prop.children
-              [ for tab, label in [ RecipeTab, "Recipe"; CooklangTab, "Cooklang" ] ->
+              [ for tab, label in [ RecipeTab, "Recipe"; CooklangTab, "Cooklang"; TagsTab, "Tags" ] ->
                     let selected = (tab = current)
 
                     Html.button
@@ -1055,6 +1298,131 @@ let private detailTabs (current: DetailTab) dispatch =
                           )
                           prop.text label
                           prop.onClick (fun _ -> dispatch (SelectDetailTab tab)) ] ] ]
+
+/// One row on a recipe's Tags tab. The box is whether this recipe has the
+/// tag; the manners are a shopping-list row's - a tap anywhere on the row
+/// puts the tag on or takes it off, a long press turns the name into a field
+/// and renames the tag itself, everywhere it is used. The × deletes it for
+/// good, so it has its own press.
+let private tagRow (tag: Tag) (isOn: bool) (editing: string option) (onToggle: unit -> unit) dispatch =
+    let field = $"tag-{tag.id}"
+
+    Html.li
+        [ prop.key tag.id
+          prop.children
+              [ Html.div
+                    [ prop.className "press-row flex select-none items-center gap-2 py-1"
+                      prop.onPointerDown (fun e ->
+                          if editing.IsNone && e.button = 0 then
+                              e.currentTarget?setPointerCapture (e.pointerId)
+                              Press.start e (fun () -> dispatch (StartEditTag tag.id)))
+                      prop.onPointerMove Press.move
+                      prop.onPointerCancel (fun _ -> Press.cancel ())
+                      prop.onPointerUp (fun _ ->
+                          match Press.finish () with
+                          | Press.Tap -> onToggle ()
+                          // Focusing inside the pointer event is what raises
+                          // the keyboard on iOS; from the timer it would not.
+                          | Press.LongPress ->
+                              match document.getElementById field with
+                              | null -> ()
+                              | el -> el.focus ()
+                          | Press.NoPress -> ())
+                      prop.onContextMenu (fun e -> e.preventDefault ())
+                      prop.children
+                          [ Html.input
+                                [ prop.type' "checkbox"
+                                  prop.className "pointer-events-none"
+                                  prop.isChecked isOn
+                                  prop.onChange (fun (_: bool) -> onToggle ()) ]
+                            match editing with
+                            // No form around the field: the whole detail page is
+                            // one, and Enter there would save the recipe.
+                            | Some draft ->
+                                Html.input
+                                    [ prop.id field
+                                      prop.className "min-w-0 flex-1 select-text bg-transparent py-0.5 outline-none"
+                                      prop.type' "text"
+                                      prop.ariaLabel "Rename tag"
+                                      prop.autoComplete "off"
+                                      prop.custom ("enterKeyHint", "done")
+                                      prop.value draft
+                                      prop.onChange (EditTagChanged >> dispatch)
+                                      prop.onKeyDown (fun e ->
+                                          if e.key = "Enter" then
+                                              e.preventDefault ()
+                                              dispatch SaveEditTag
+                                          elif e.key = "Escape" then
+                                              dispatch CancelEditTag)
+                                      prop.onBlur (fun _ -> dispatch SaveEditTag) ]
+                            | None ->
+                                // The × follows the name, as it does under a
+                                // menu entry's sides, rather than floating off
+                                // at the right edge of the row.
+                                Html.span [ prop.className "min-w-0 truncate"; prop.text tag.name ]
+                                Html.button
+                                    [ prop.type' "button"
+                                      prop.className "icon-btn px-1 text-gray-400 hover:text-red-600"
+                                      prop.title "Delete tag"
+                                      prop.text "×"
+                                      // Keeps the row's press out of it, so this
+                                      // is a tap on the × and nothing else.
+                                      prop.onPointerDown (fun e -> e.stopPropagation ())
+                                      prop.onClick (fun _ -> dispatch (ConfirmTagDelete tag.id)) ] ] ] ] ]
+
+/// The blank row under the tags. Same manners as the shopping list's (Enter
+/// adds and leaves the field ready for the next one; tapping away adds too),
+/// again without a form of its own.
+let private newTagRow (recipeId: string) (text: string) dispatch =
+    Html.li
+        [ // Keyed, like the rows above it, so adding keeps this input focused.
+          prop.key "new"
+          prop.className "flex items-center gap-2 py-1"
+          prop.children
+              [ // Lines the text up with the boxes above without being one.
+                Html.input [ prop.type' "checkbox"; prop.disabled true; prop.ariaHidden true; prop.tabIndex -1 ]
+                Html.input
+                    [ prop.className "min-w-0 flex-1 bg-transparent py-0.5 outline-none placeholder:text-gray-400"
+                      prop.type' "text"
+                      prop.placeholder "Add a tag"
+                      prop.ariaLabel "Add a tag"
+                      prop.autoComplete "off"
+                      prop.custom ("enterKeyHint", "done")
+                      prop.value text
+                      prop.onChange (NewTagChanged >> dispatch)
+                      prop.onKeyDown (fun e ->
+                          if e.key = "Enter" then
+                              e.preventDefault ()
+                              dispatch (AddTag recipeId))
+                      prop.onBlur (fun _ -> dispatch (AddTag recipeId)) ] ] ]
+
+/// A recipe's Tags tab: every tag the user has, ticked where this recipe has
+/// it, and a blank row that makes a new one. Tags live nowhere else, so this
+/// is also where they are renamed and deleted.
+let private tagsTab (model: Model) (recipeId: string) dispatch =
+    let on =
+        model.RecipeTags
+        |> List.filter (fun l -> l.recipe_id = recipeId)
+        |> List.map (fun l -> l.tag_id)
+        |> Set.ofList
+
+    let editing (tag: Tag) =
+        match model.EditingTag with
+        | Some(id, draft) when id = tag.id -> Some draft
+        | _ -> None
+
+    Html.div
+        [ Html.ul
+              [ prop.className "flex flex-col gap-1"
+                prop.children
+                    [ for tag in Shared.Tag.sorted (fun (t: Tag) -> t.name) model.Tags do
+                          tagRow tag (on.Contains tag.id) (editing tag) (fun () -> dispatch (ToggleTag(recipeId, tag.id))) dispatch
+                      newTagRow recipeId model.NewTag dispatch ] ]
+          // The long press is the only way to a rename, and unlike the
+          // shopping list this tab is where tags are looked after.
+          Html.p
+              [ prop.className "mt-3 text-sm text-gray-500"
+                prop.text "Tap a tag to put it on this recipe. Long press one to rename it." ] ]
 
 let private detailPage (model: Model) (id: string) (known: CooklangEditor.KnownNames) dispatch =
     match findRecipe id model.Recipes, model.Edit with
@@ -1117,7 +1485,13 @@ let private detailPage (model: Model) (id: string) (known: CooklangEditor.KnownN
                               + if model.DetailTab = CooklangTab then " flex" else " hidden"
                           )
                           prop.children
-                              [ CooklangEditor.CooklangEditor(edit.Body, known, "Recipe", EditBodyChanged >> dispatch) ] ] ] ]
+                              [ CooklangEditor.CooklangEditor(edit.Body, known, "Recipe", EditBodyChanged >> dispatch) ] ]
+                    Html.div
+                        [ prop.className (
+                              "min-h-0 flex-1 overflow-y-auto"
+                              + if model.DetailTab = TagsTab then "" else " hidden"
+                          )
+                          prop.children [ tagsTab model id dispatch ] ] ] ]
     | _ ->
         Html.div
             [ Html.p "Recipe not found (it may still be syncing, or it was deleted)."
@@ -1153,62 +1527,6 @@ let private newItemRow (text: string) dispatch =
 /// "Created: 3 days ago", from a row's ISO timestamp.
 let private createdAge (createdAt: string) =
     "Created: " + Shared.Created.age DateTime.Now ((DateTime.Parse createdAt).ToLocalTime())
-
-/// Tap or long press on a list row. One press is in flight at a time: from
-/// pointer-down it is `Pending`; if the finger stays put for `holdMs` it
-/// becomes `Held` and the row goes into editing; lifting before that is a
-/// tap; moving (a scroll) or the browser cancelling it drops it.
-module private Press =
-    type State =
-        | Idle
-        | Pending of timer: float * x: float * y: float
-        | Held
-
-    /// How a press ended: lifted in time, lifted after the hold, or there
-    /// was no press on (a lift after a scroll cancelled it, or in a field).
-    type Ended =
-        | Tap
-        | LongPress
-        | NoPress
-
-    let private holdMs = 500
-    let private slop = 10.0
-    let mutable private state = Idle
-
-    let cancel () =
-        match state with
-        | Pending(timer, _, _) -> window.clearTimeout timer
-        | _ -> ()
-
-        state <- Idle
-
-    let start (e: Browser.Types.PointerEvent) (onHeld: unit -> unit) =
-        cancel ()
-
-        let timer =
-            window.setTimeout (
-                (fun () ->
-                    state <- Held
-                    onHeld ()),
-                holdMs
-            )
-
-        state <- Pending(timer, e.clientX, e.clientY)
-
-    let move (e: Browser.Types.PointerEvent) =
-        match state with
-        | Pending(_, x, y) when abs (e.clientX - x) > slop || abs (e.clientY - y) > slop -> cancel ()
-        | _ -> ()
-
-    /// What the press that just ended was, and puts things back to rest.
-    let finish () =
-        let ended = state
-        cancel ()
-
-        match ended with
-        | Pending _ -> Tap
-        | Held -> LongPress
-        | Idle -> NoPress
 
 /// A shopping-list row: a tap anywhere on it (text or box) checks it, a
 /// long press turns the text into a field for editing it. The box is only
@@ -1569,6 +1887,10 @@ let View () =
               | None -> Html.none
               match model.PendingDelete |> Option.bind (fun id -> findRecipe id model.Recipes) with
               | Some recipe -> confirmDeleteModal recipe dispatch
+              | None -> Html.none
+              match model.PendingTagDelete |> Option.bind (fun id -> model.Tags |> List.tryFind (fun t -> t.id = id)) with
+              | Some tag ->
+                  confirmTagDeleteModal tag (model.RecipeTags |> List.filter (fun l -> l.tag_id = tag.id) |> List.length) dispatch
               | None -> Html.none
               match model.PendingArchive with
               | Some CurrentShoppingList ->

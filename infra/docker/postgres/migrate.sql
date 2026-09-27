@@ -65,3 +65,22 @@ CREATE INDEX IF NOT EXISTS menu_sides_menu_recipe_id ON menu_sides (menu_recipe_
 -- Archiving: the current list/menu is the newest with archived_at NULL.
 ALTER TABLE shopping_lists ADD COLUMN IF NOT EXISTS archived_at timestamptz;
 ALTER TABLE menus          ADD COLUMN IF NOT EXISTS archived_at timestamptz;
+
+-- Tags: one row per name per user, plus a row per recipe each tag is on.
+CREATE TABLE IF NOT EXISTS tags (
+    id          uuid PRIMARY KEY,
+    user_id     text NOT NULL,
+    name        text NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS recipe_tags (
+    id          uuid PRIMARY KEY,
+    user_id     text NOT NULL,
+    recipe_id   uuid NOT NULL,
+    tag_id      uuid NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS tags_user_id           ON tags (user_id);
+CREATE INDEX IF NOT EXISTS recipe_tags_user_id    ON recipe_tags (user_id);
+CREATE INDEX IF NOT EXISTS recipe_tags_recipe_id  ON recipe_tags (recipe_id);
+CREATE INDEX IF NOT EXISTS recipe_tags_tag_id     ON recipe_tags (tag_id);

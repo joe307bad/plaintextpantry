@@ -74,6 +74,24 @@ CREATE TABLE menu_sides (
     created_at      timestamptz NOT NULL DEFAULT now()
 );
 
+-- A tag is a name a user gives a recipe ("quick", "Kaitlyn's fav"); one row
+-- per name per user, with a recipe_tags row per recipe it is on. Names are
+-- free text, and the app treats two that differ only in case as one tag.
+CREATE TABLE tags (
+    id          uuid PRIMARY KEY,
+    user_id     text NOT NULL,
+    name        text NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE recipe_tags (
+    id          uuid PRIMARY KEY,
+    user_id     text NOT NULL,
+    recipe_id   uuid NOT NULL,
+    tag_id      uuid NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE INDEX recipes_user_id ON recipes (user_id);
 CREATE INDEX shopping_lists_user_id ON shopping_lists (user_id);
 CREATE INDEX shopping_items_user_id ON shopping_items (user_id);
@@ -83,6 +101,10 @@ CREATE INDEX menu_recipes_user_id ON menu_recipes (user_id);
 CREATE INDEX menu_recipes_menu_id ON menu_recipes (menu_id);
 CREATE INDEX menu_sides_user_id ON menu_sides (user_id);
 CREATE INDEX menu_sides_menu_recipe_id ON menu_sides (menu_recipe_id);
+CREATE INDEX tags_user_id ON tags (user_id);
+CREATE INDEX recipe_tags_user_id ON recipe_tags (user_id);
+CREATE INDEX recipe_tags_recipe_id ON recipe_tags (recipe_id);
+CREATE INDEX recipe_tags_tag_id ON recipe_tags (tag_id);
 
 CREATE PUBLICATION powersync FOR ALL TABLES;
 SQL

@@ -26,3 +26,9 @@ streams:
   menu_sides:
     auto_subscribe: true
     query: SELECT * FROM menu_sides WHERE user_id = auth.user_id()
+  tags:
+    auto_subscribe: true
+    query: SELECT * FROM tags WHERE user_id = auth.user_id()
+  recipe_tags:
+    auto_subscribe: true
+    query: SELECT * FROM recipe_tags WHERE user_id = auth.user_id()

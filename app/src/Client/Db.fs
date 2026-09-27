@@ -48,6 +48,16 @@ type MenuSide =
       ``done``: int
       created_at: string }
 
+/// Row shape of the local `tags` table: one row per tag name.
+type Tag = { id: string; name: string; created_at: string }
+
+/// Row shape of the local `recipe_tags` table: one row per tag on a recipe.
+type RecipeTag =
+    { id: string
+      recipe_id: string
+      tag_id: string
+      created_at: string }
+
 /// Calls to the F# server, using the coders shared with it.
 module private Api =
     let private ensureOk (response: Response) =
@@ -146,7 +156,9 @@ let db =
           [ "menu_recipe_id", column.text
             "name", column.text
             "done", column.integer
-            "created_at", column.text ] ]
+            "created_at", column.text ]
+          "tags", [ "name", column.text; "created_at", column.text ]
+          "recipe_tags", [ "recipe_id", column.text; "tag_id", column.text; "created_at", column.text ] ]
 
 let private toCrudOp (entry: CrudEntry) : CrudOp =
     let data =
@@ -288,10 +300,12 @@ let addRecipe (recipe: Recipe) =
 let updateRecipe (id: string) (title: string) (body: string) =
     db.execute ("UPDATE recipes SET title = ?, body = ? WHERE id = ?", [| title; body; id |])
 
-/// Also takes the recipe, and the sides under it, off every menu it was on.
+/// Also takes the recipe, and the sides under it, off every menu it was on,
+/// and takes its tags off it (the tags themselves stay).
 let deleteRecipe (id: string) =
     promise {
         let! _ = db.execute ("DELETE FROM recipes WHERE id = ?", [| id |])
+        let! _ = db.execute ("DELETE FROM recipe_tags WHERE recipe_id = ?", [| id |])
 
         let! _ =
             db.execute (
@@ -546,3 +560,112 @@ let removeMenuSide (id: string) =
 /// Puts the menu away; its entries and sides stay with it.
 let archiveMenu (id: string) =
     db.execute ("UPDATE menus SET archived_at = ? WHERE id = ?", [| nowIso (); id |])
+
+
+// ---------------------------------------------------------------------------
+// Tags
+// ---------------------------------------------------------------------------
+
+/// Live tags, in the order they were made. The UI sorts them by name to show
+/// them (`Shared.Tag.sorted`), so a rename doesn't move rows about here.
+let watchTags (onChange: Tag list -> unit) =
+    let sql = "SELECT id, name, created_at FROM tags ORDER BY created_at, id"
+    let query = db.query<Tag> {| sql = sql; parameters = [||] |}
+
+    query.watch().registerListener
+        { new WatchedQueryListener<Tag> with
+            member _.onData(rows) = onChange (List.ofArray rows)
+            member _.onError(err) = JS.console.error ("watch tags", err) }
+    |> ignore
+
+/// Live tag-to-recipe links across every recipe. The UI picks out the ones
+/// for the recipe it is showing.
+let watchRecipeTags (onChange: RecipeTag list -> unit) =
+    let sql = "SELECT id, recipe_id, tag_id, created_at FROM recipe_tags ORDER BY created_at, id"
+    let query = db.query<RecipeTag> {| sql = sql; parameters = [||] |}
+
+    query.watch().registerListener
+        { new WatchedQueryListener<RecipeTag> with
+            member _.onData(rows) = onChange (List.ofArray rows)
+            member _.onError(err) = JS.console.error ("watch recipe tags", err) }
+    |> ignore
+
+/// The row that puts a tag on a recipe. Built by the caller, like
+/// `newMenuSide`, so the UI can show it before the insert lands.
+let newRecipeTag (recipeId: string) (tagId: string) : RecipeTag =
+    { id = string (Guid.NewGuid())
+      recipe_id = recipeId
+      tag_id = tagId
+      created_at = nowIso () }
+
+let addRecipeTag (link: RecipeTag) =
+    db.execute (
+        "INSERT INTO recipe_tags (id, recipe_id, tag_id, created_at) VALUES (?, ?, ?, ?)",
+        [| link.id; link.recipe_id; link.tag_id; link.created_at |]
+    )
+
+let removeRecipeTag (id: string) =
+    db.execute ("DELETE FROM recipe_tags WHERE id = ?", [| id |])
+
+/// What typing a name into a recipe's Tags tab does: the tag to create when
+/// that name is new, and the row that puts it on the recipe. Both are `None`
+/// when the name is blank or the recipe has that tag already. Pure, like
+/// `planShoppingAdd`: returns the tags and links as the UI should now show
+/// them, plus the plan.
+type TagPlan = { NewTag: Tag option; Linked: RecipeTag option }
+
+let planTagAdd (tags: Tag list) (links: RecipeTag list) (recipeId: string) (name: string) =
+    let name = Shared.Tag.clean name
+    let nothing = { NewTag = None; Linked = None }
+
+    if name = "" then
+        tags, links, nothing
+    else
+        // Typing a name that is already a tag puts that tag on, rather than
+        // making a second one by the same name.
+        let tag, newTag =
+            match Shared.Tag.find (fun (t: Tag) -> t.name) name tags with
+            | Some t -> t, None
+            | None ->
+                let t = { id = string (Guid.NewGuid()); name = name; created_at = nowIso () }
+                t, Some t
+
+        if links |> List.exists (fun l -> l.recipe_id = recipeId && l.tag_id = tag.id) then
+            tags, links, nothing
+        else
+            let link = newRecipeTag recipeId tag.id
+
+            (match newTag with
+             | Some t -> tags @ [ t ]
+             | None -> tags),
+            links @ [ link ],
+            { NewTag = newTag; Linked = Some link }
+
+let addTag (plan: TagPlan) =
+    promise {
+        match plan.NewTag with
+        | Some tag ->
+            let! _ =
+                db.execute ("INSERT INTO tags (id, name, created_at) VALUES (?, ?, ?)", [| tag.id; tag.name; tag.created_at |])
+
+            ()
+        | None -> ()
+
+        match plan.Linked with
+        | Some link ->
+            let! _ = addRecipeTag link
+            ()
+        | None -> ()
+    }
+
+/// Renames the tag everywhere at once: recipes carry its id, not its name.
+let renameTag (id: string) (name: string) =
+    db.execute ("UPDATE tags SET name = ? WHERE id = ?", [| Shared.Tag.clean name; id |])
+
+/// Drops the tag and takes it off every recipe.
+let deleteTag (id: string) =
+    promise {
+        let! _ = db.execute ("DELETE FROM recipe_tags WHERE tag_id = ?", [| id |])
+        let! _ = db.execute ("DELETE FROM tags WHERE id = ?", [| id |])
+        ()
+    }
