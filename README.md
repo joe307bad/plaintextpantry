@@ -36,6 +36,14 @@ infra/terraform    AWS resources
 infra/deploy       Production compose stack and the script that applies it on the box
 ```
 
+Everything belongs to a **pantry**: a household with an owner, a name and a
+list of members, carried on every row as `pantry_id`. You get one of your own
+the first time you sign in, and join someone else's by scanning the QR code on
+their settings page — which asks to be let in and waits for the owner to
+approve it. Inside a pantry every member may do anything, so the upload path
+checks membership rather than ownership (`decide` in `Server/Db.fs`) and the
+sync rules hand a device the rows of the pantries it is approved in.
+
 ## Running locally
 
 You need Docker, the .NET 10 SDK and Node.
@@ -57,9 +65,9 @@ leaving the app.
 
 Schema changes go in two places: `infra/docker/postgres/init/01-init.sh`
 (fresh databases) and `migrate.sql` (re-runnable, applied on every start).
-New tables also need a stream in `infra/docker/powersync/sync-config.yaml`,
-a column list in the client's `Db.fs`, and an entry in the server's upload
-whitelist (`Server/Db.fs`).
+New tables also need a `pantry_id`, a stream in
+`infra/docker/powersync/sync-config.yaml`, a column list in the client's
+`Db.fs`, and an entry in the server's upload whitelist (`Server/Db.fs`).
 
 ## Deploying to AWS
 

@@ -11,16 +11,49 @@ open Thoth.Json.JavaScript
 open Shared
 open PowerSync
 
+/// Row shape of the local `pantries` table: the household everything below
+/// belongs to. `user_id` is its owner.
+type Pantry =
+    { id: string
+      user_id: string
+      name: string
+      created_at: string }
+
+/// Row shape of the local `pantry_members` table: one row per person in a
+/// pantry, the owner included. `status` is `Shared.Pantry.Pending` until the
+/// owner approves it. `email` and `name` are written by that person's own
+/// client, since the server only ever knows their user id.
+type PantryMember =
+    { id: string
+      pantry_id: string
+      user_id: string
+      email: string
+      name: string
+      status: string
+      created_at: string }
+
 /// Row shape of the local `recipes` table. Field names match SQLite columns.
-type Recipe = { id: string; title: string; body: string; created_at: string }
+/// `pantry_id`, here and on every row below, is the pantry it belongs to:
+/// what the pages filter by, and what decides who else can see it.
+type Recipe =
+    { id: string
+      pantry_id: string
+      title: string
+      body: string
+      created_at: string }
 
 /// Row shape of the local `shopping_lists` table. Archived lists are kept
 /// but never shown; the watch query leaves them out, so a row here is live.
-type ShoppingList = { id: string; name: string; created_at: string }
+type ShoppingList =
+    { id: string
+      pantry_id: string
+      name: string
+      created_at: string }
 
 /// Row shape of the local `shopping_items` table. `quantity` is text so "some" survives; `done` is 0/1.
 type ShoppingItem =
     { id: string
+      pantry_id: string
       list_id: string
       name: string
       quantity: string
@@ -29,12 +62,17 @@ type ShoppingItem =
       created_at: string }
 
 /// Row shape of the local `menus` table. A shopping list's twin: only a name.
-type Menu = { id: string; name: string; created_at: string }
+type Menu =
+    { id: string
+      pantry_id: string
+      name: string
+      created_at: string }
 
 /// Row shape of the local `menu_recipes` table: one row per time a recipe
 /// was added to a menu.
 type MenuRecipe =
     { id: string
+      pantry_id: string
       menu_id: string
       recipe_id: string
       created_at: string }
@@ -43,17 +81,23 @@ type MenuRecipe =
 /// entry. `done` is 0/1, checked off from the shopping list.
 type MenuSide =
     { id: string
+      pantry_id: string
       menu_recipe_id: string
       name: string
       ``done``: int
       created_at: string }
 
 /// Row shape of the local `tags` table: one row per tag name.
-type Tag = { id: string; name: string; created_at: string }
+type Tag =
+    { id: string
+      pantry_id: string
+      name: string
+      created_at: string }
 
 /// Row shape of the local `recipe_tags` table: one row per tag on a recipe.
 type RecipeTag =
     { id: string
+      pantry_id: string
       recipe_id: string
       tag_id: string
       created_at: string }
@@ -135,30 +179,62 @@ module private Api =
         |> Promise.bind ensureOk
         |> Promise.map ignore
 
+/// Which pantry the header was last left on. A habit of the device, not
+/// something to sync: two people in one pantry may well be looking at
+/// different ones. Cleared on sign-out with everything else.
+module PickedPantry =
+    let private key = "ptp.pantry"
+
+    let get () =
+        match Browser.WebStorage.localStorage.getItem key with
+        | null -> None
+        | id -> Some id
+
+    let set (id: string) =
+        Browser.WebStorage.localStorage.setItem (key, id)
+
+    let clear () =
+        Browser.WebStorage.localStorage.removeItem key
+
 [<Emit("new Date().toISOString()")>]
 let private nowIso () : string = jsNative
 
 let db =
     database
         "plaintextpantry.sqlite"
-        [ "recipes", [ "title", column.text; "body", column.text; "created_at", column.text ]
-          "shopping_lists", [ "name", column.text; "created_at", column.text; "archived_at", column.text ]
+        [ "pantries", [ "user_id", column.text; "name", column.text; "created_at", column.text ]
+          "pantry_members",
+          [ "pantry_id", column.text
+            "user_id", column.text
+            "email", column.text
+            "name", column.text
+            "status", column.text
+            "created_at", column.text ]
+          "recipes",
+          [ "pantry_id", column.text; "title", column.text; "body", column.text; "created_at", column.text ]
+          "shopping_lists",
+          [ "pantry_id", column.text; "name", column.text; "created_at", column.text; "archived_at", column.text ]
           "shopping_items",
-          [ "list_id", column.text
+          [ "pantry_id", column.text
+            "list_id", column.text
             "name", column.text
             "quantity", column.text
             "unit", column.text
             "done", column.integer
             "created_at", column.text ]
-          "menus", [ "name", column.text; "created_at", column.text; "archived_at", column.text ]
-          "menu_recipes", [ "menu_id", column.text; "recipe_id", column.text; "created_at", column.text ]
+          "menus",
+          [ "pantry_id", column.text; "name", column.text; "created_at", column.text; "archived_at", column.text ]
+          "menu_recipes",
+          [ "pantry_id", column.text; "menu_id", column.text; "recipe_id", column.text; "created_at", column.text ]
           "menu_sides",
-          [ "menu_recipe_id", column.text
+          [ "pantry_id", column.text
+            "menu_recipe_id", column.text
             "name", column.text
             "done", column.integer
             "created_at", column.text ]
-          "tags", [ "name", column.text; "created_at", column.text ]
-          "recipe_tags", [ "recipe_id", column.text; "tag_id", column.text; "created_at", column.text ] ]
+          "tags", [ "pantry_id", column.text; "name", column.text; "created_at", column.text ]
+          "recipe_tags",
+          [ "pantry_id", column.text; "recipe_id", column.text; "tag_id", column.text; "created_at", column.text ] ]
 
 let private toCrudOp (entry: CrudEntry) : CrudOp =
     let data =
@@ -209,6 +285,8 @@ let currentUser () = Api.getMe ()
 let signOut () =
     promise {
         Api.forgetMe ()
+        PickedPantry.clear ()
+
         do! db.disconnectAndClear ()
         Browser.Dom.window.location.href <- Route.logout
     }
@@ -220,7 +298,7 @@ let signIn (returnTo: string) =
 let watchRecipes (onChange: Recipe list -> unit) =
     // Rows synced before `body` existed have NULL there; the UI wants a string.
     let sql =
-        "SELECT id, title, COALESCE(body, '') AS body, created_at FROM recipes ORDER BY created_at DESC"
+        "SELECT id, pantry_id, title, COALESCE(body, '') AS body, created_at FROM recipes ORDER BY created_at DESC"
 
     let query = db.query<Recipe> {| sql = sql; parameters = [||] |}
 
@@ -233,7 +311,8 @@ let watchRecipes (onChange: Recipe list -> unit) =
 /// Live un-archived shopping lists, newest first. The head is the one
 /// adding goes into.
 let watchShoppingLists (onChange: ShoppingList list -> unit) =
-    let sql = "SELECT id, name, created_at FROM shopping_lists WHERE archived_at IS NULL ORDER BY created_at DESC, id"
+    let sql =
+        "SELECT id, pantry_id, name, created_at FROM shopping_lists WHERE archived_at IS NULL ORDER BY created_at DESC, id"
     let query = db.query<ShoppingList> {| sql = sql; parameters = [||] |}
 
     query.watch().registerListener
@@ -246,7 +325,7 @@ let watchShoppingLists (onChange: ShoppingList list -> unit) =
 /// first within each group. The UI picks out the list it is showing.
 let watchShoppingItems (onChange: ShoppingItem list -> unit) =
     let sql =
-        "SELECT id, list_id, name, quantity, unit, done, created_at FROM shopping_items ORDER BY done, created_at, id"
+        "SELECT id, pantry_id, list_id, name, quantity, unit, done, created_at FROM shopping_items ORDER BY done, created_at, id"
 
     let query = db.query<ShoppingItem> {| sql = sql; parameters = [||] |}
 
@@ -258,7 +337,7 @@ let watchShoppingItems (onChange: ShoppingItem list -> unit) =
 
 /// Live un-archived menus, newest first. The head is the one adding goes into.
 let watchMenus (onChange: Menu list -> unit) =
-    let sql = "SELECT id, name, created_at FROM menus WHERE archived_at IS NULL ORDER BY created_at DESC, id"
+    let sql = "SELECT id, pantry_id, name, created_at FROM menus WHERE archived_at IS NULL ORDER BY created_at DESC, id"
     let query = db.query<Menu> {| sql = sql; parameters = [||] |}
 
     query.watch().registerListener
@@ -270,7 +349,7 @@ let watchMenus (onChange: Menu list -> unit) =
 /// Live menu entries across every menu, in the order they were added. The
 /// UI picks out the menu it is showing.
 let watchMenuRecipes (onChange: MenuRecipe list -> unit) =
-    let sql = "SELECT id, menu_id, recipe_id, created_at FROM menu_recipes ORDER BY created_at, id"
+    let sql = "SELECT id, pantry_id, menu_id, recipe_id, created_at FROM menu_recipes ORDER BY created_at, id"
     let query = db.query<MenuRecipe> {| sql = sql; parameters = [||] |}
 
     query.watch().registerListener
@@ -285,16 +364,17 @@ let watchStatus (onChange: SyncStatus -> unit) =
 
 /// The row a new recipe becomes. Built by the caller so the UI can show it
 /// before the insert lands.
-let newRecipe (title: string) (body: string) : Recipe =
+let newRecipe (pantryId: string) (title: string) (body: string) : Recipe =
     { id = string (Guid.NewGuid())
+      pantry_id = pantryId
       title = title
       body = body
       created_at = nowIso () }
 
 let addRecipe (recipe: Recipe) =
     db.execute (
-        "INSERT INTO recipes (id, title, body, created_at) VALUES (?, ?, ?, ?)",
-        [| recipe.id; recipe.title; recipe.body; recipe.created_at |]
+        "INSERT INTO recipes (id, pantry_id, title, body, created_at) VALUES (?, ?, ?, ?, ?)",
+        [| recipe.id; recipe.pantry_id; recipe.title; recipe.body; recipe.created_at |]
     )
 
 let updateRecipe (id: string) (title: string) (body: string) =
@@ -325,9 +405,10 @@ let private quantityText (quantity: Quantity option) =
     | Some(Quantity.Text t) -> t
     | None -> ""
 
-/// The list a user with none gets the first time they add something.
-let private newShoppingList () : ShoppingList =
+/// The list a pantry with none gets the first time something is added to it.
+let private newShoppingList (pantryId: string) : ShoppingList =
     { id = string (Guid.NewGuid())
+      pantry_id = pantryId
       name = Shared.ShoppingList.defaultName DateTime.Now
       created_at = nowIso () }
 
@@ -364,12 +445,17 @@ type ShoppingPlan =
 /// off the lists the UI already holds (a mirror of the tables), so nothing
 /// is read from SQLite. Returns the lists and items as the UI should now
 /// show them, plus the plan.
-let private planAdd (lists: ShoppingList list) (items: ShoppingItem list) (entries: (string * Quantity option * string) list) =
+let private planAdd
+    (pantryId: string)
+    (lists: ShoppingList list)
+    (items: ShoppingItem list)
+    (entries: (string * Quantity option * string) list)
+    =
     let target, newList =
         match lists with
         | l :: _ -> l, None
         | [] ->
-            let l = newShoppingList ()
+            let l = newShoppingList pantryId
             l, Some l
 
     let listId = target.id
@@ -390,6 +476,7 @@ let private planAdd (lists: ShoppingList list) (items: ShoppingItem list) (entri
         | _ ->
             let row =
                 { id = string (Guid.NewGuid())
+                  pantry_id = pantryId
                   list_id = listId
                   name = name
                   quantity = quantityText quantity
@@ -413,12 +500,12 @@ let private planAdd (lists: ShoppingList list) (items: ShoppingItem list) (entri
       Inserted = items |> List.filter (fun i -> inserted.Contains i.id) }
 
 /// A recipe's ingredients.
-let planShoppingAdd lists items (ingredients: Cooklang.Ingredient list) =
-    planAdd lists items (ingredients |> List.map (fun i -> i.Name, i.Quantity, defaultArg i.Unit ""))
+let planShoppingAdd pantryId lists items (ingredients: Cooklang.Ingredient list) =
+    planAdd pantryId lists items (ingredients |> List.map (fun i -> i.Name, i.Quantity, defaultArg i.Unit ""))
 
 /// One item typed on the list page, taken as-is for the name.
-let planFreeItemAdd lists items (text: string) =
-    planAdd lists items [ text.Trim(), None, "" ]
+let planFreeItemAdd pantryId lists items (text: string) =
+    planAdd pantryId lists items [ text.Trim(), None, "" ]
 
 let addToShoppingList (plan: ShoppingPlan) =
     promise {
@@ -426,8 +513,8 @@ let addToShoppingList (plan: ShoppingPlan) =
         | Some list ->
             let! _ =
                 db.execute (
-                    "INSERT INTO shopping_lists (id, name, created_at) VALUES (?, ?, ?)",
-                    [| list.id; list.name; list.created_at |]
+                    "INSERT INTO shopping_lists (id, pantry_id, name, created_at) VALUES (?, ?, ?, ?)",
+                    [| list.id; list.pantry_id; list.name; list.created_at |]
                 )
 
             ()
@@ -440,8 +527,8 @@ let addToShoppingList (plan: ShoppingPlan) =
         for row in plan.Inserted do
             let! _ =
                 db.execute (
-                    "INSERT INTO shopping_items (id, list_id, name, quantity, unit, done, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
-                    [| row.id; row.list_id; row.name; row.quantity; row.unit; row.created_at |]
+                    "INSERT INTO shopping_items (id, pantry_id, list_id, name, quantity, unit, done, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
+                    [| row.id; row.pantry_id; row.list_id; row.name; row.quantity; row.unit; row.created_at |]
                 )
 
             ()
@@ -469,13 +556,14 @@ type MenuPlan = { NewMenu: Menu option; Inserted: MenuRecipe }
 /// Every add is a new row, so a recipe can be on a menu twice. Pure, like
 /// `planShoppingAdd`: returns the menus and entries as the UI should now
 /// show them, plus the plan.
-let planMenuAdd (menus: Menu list) (entries: MenuRecipe list) (recipeId: string) =
+let planMenuAdd (pantryId: string) (menus: Menu list) (entries: MenuRecipe list) (recipeId: string) =
     let target, newMenu =
         match menus with
         | m :: _ -> m, None
         | [] ->
             let m: Menu =
                 { id = string (Guid.NewGuid())
+                  pantry_id = pantryId
                   name = Shared.Menu.defaultName DateTime.Now (Random())
                   created_at = nowIso () }
 
@@ -483,6 +571,7 @@ let planMenuAdd (menus: Menu list) (entries: MenuRecipe list) (recipeId: string)
 
     let entry =
         { id = string (Guid.NewGuid())
+          pantry_id = pantryId
           menu_id = target.id
           recipe_id = recipeId
           created_at = nowIso () }
@@ -499,8 +588,8 @@ let addToMenu (plan: MenuPlan) =
         | Some menu ->
             let! _ =
                 db.execute (
-                    "INSERT INTO menus (id, name, created_at) VALUES (?, ?, ?)",
-                    [| menu.id; menu.name; menu.created_at |]
+                    "INSERT INTO menus (id, pantry_id, name, created_at) VALUES (?, ?, ?, ?)",
+                    [| menu.id; menu.pantry_id; menu.name; menu.created_at |]
                 )
 
             ()
@@ -510,8 +599,8 @@ let addToMenu (plan: MenuPlan) =
 
         let! _ =
             db.execute (
-                "INSERT INTO menu_recipes (id, menu_id, recipe_id, created_at) VALUES (?, ?, ?, ?)",
-                [| e.id; e.menu_id; e.recipe_id; e.created_at |]
+                "INSERT INTO menu_recipes (id, pantry_id, menu_id, recipe_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                [| e.id; e.pantry_id; e.menu_id; e.recipe_id; e.created_at |]
             )
 
         ()
@@ -527,7 +616,7 @@ let removeMenuRecipe (id: string) =
 
 /// Live sides across every menu, in the order they were added.
 let watchMenuSides (onChange: MenuSide list -> unit) =
-    let sql = "SELECT id, menu_recipe_id, name, done, created_at FROM menu_sides ORDER BY created_at, id"
+    let sql = "SELECT id, pantry_id, menu_recipe_id, name, done, created_at FROM menu_sides ORDER BY created_at, id"
     let query = db.query<MenuSide> {| sql = sql; parameters = [||] |}
 
     query.watch().registerListener
@@ -538,8 +627,9 @@ let watchMenuSides (onChange: MenuSide list -> unit) =
 
 /// The row a new side becomes; built by the caller so the UI can show it
 /// before the insert lands.
-let newMenuSide (menuRecipeId: string) (name: string) : MenuSide =
+let newMenuSide (pantryId: string) (menuRecipeId: string) (name: string) : MenuSide =
     { id = string (Guid.NewGuid())
+      pantry_id = pantryId
       menu_recipe_id = menuRecipeId
       name = name.Trim()
       ``done`` = 0
@@ -547,8 +637,8 @@ let newMenuSide (menuRecipeId: string) (name: string) : MenuSide =
 
 let addMenuSide (side: MenuSide) =
     db.execute (
-        "INSERT INTO menu_sides (id, menu_recipe_id, name, done, created_at) VALUES (?, ?, ?, 0, ?)",
-        [| side.id; side.menu_recipe_id; side.name; side.created_at |]
+        "INSERT INTO menu_sides (id, pantry_id, menu_recipe_id, name, done, created_at) VALUES (?, ?, ?, ?, 0, ?)",
+        [| side.id; side.pantry_id; side.menu_recipe_id; side.name; side.created_at |]
     )
 
 let setMenuSideDone (id: string) (isDone: bool) =
@@ -569,7 +659,7 @@ let archiveMenu (id: string) =
 /// Live tags, in the order they were made. The UI sorts them by name to show
 /// them (`Shared.Tag.sorted`), so a rename doesn't move rows about here.
 let watchTags (onChange: Tag list -> unit) =
-    let sql = "SELECT id, name, created_at FROM tags ORDER BY created_at, id"
+    let sql = "SELECT id, pantry_id, name, created_at FROM tags ORDER BY created_at, id"
     let query = db.query<Tag> {| sql = sql; parameters = [||] |}
 
     query.watch().registerListener
@@ -581,7 +671,7 @@ let watchTags (onChange: Tag list -> unit) =
 /// Live tag-to-recipe links across every recipe. The UI picks out the ones
 /// for the recipe it is showing.
 let watchRecipeTags (onChange: RecipeTag list -> unit) =
-    let sql = "SELECT id, recipe_id, tag_id, created_at FROM recipe_tags ORDER BY created_at, id"
+    let sql = "SELECT id, pantry_id, recipe_id, tag_id, created_at FROM recipe_tags ORDER BY created_at, id"
     let query = db.query<RecipeTag> {| sql = sql; parameters = [||] |}
 
     query.watch().registerListener
@@ -592,16 +682,17 @@ let watchRecipeTags (onChange: RecipeTag list -> unit) =
 
 /// The row that puts a tag on a recipe. Built by the caller, like
 /// `newMenuSide`, so the UI can show it before the insert lands.
-let newRecipeTag (recipeId: string) (tagId: string) : RecipeTag =
+let newRecipeTag (pantryId: string) (recipeId: string) (tagId: string) : RecipeTag =
     { id = string (Guid.NewGuid())
+      pantry_id = pantryId
       recipe_id = recipeId
       tag_id = tagId
       created_at = nowIso () }
 
 let addRecipeTag (link: RecipeTag) =
     db.execute (
-        "INSERT INTO recipe_tags (id, recipe_id, tag_id, created_at) VALUES (?, ?, ?, ?)",
-        [| link.id; link.recipe_id; link.tag_id; link.created_at |]
+        "INSERT INTO recipe_tags (id, pantry_id, recipe_id, tag_id, created_at) VALUES (?, ?, ?, ?, ?)",
+        [| link.id; link.pantry_id; link.recipe_id; link.tag_id; link.created_at |]
     )
 
 let removeRecipeTag (id: string) =
@@ -614,7 +705,7 @@ let removeRecipeTag (id: string) =
 /// them, plus the plan.
 type TagPlan = { NewTag: Tag option; Linked: RecipeTag option }
 
-let planTagAdd (tags: Tag list) (links: RecipeTag list) (recipeId: string) (name: string) =
+let planTagAdd (pantryId: string) (tags: Tag list) (links: RecipeTag list) (recipeId: string) (name: string) =
     let name = Shared.Tag.clean name
     let nothing = { NewTag = None; Linked = None }
 
@@ -627,13 +718,18 @@ let planTagAdd (tags: Tag list) (links: RecipeTag list) (recipeId: string) (name
             match Shared.Tag.find (fun (t: Tag) -> t.name) name tags with
             | Some t -> t, None
             | None ->
-                let t = { id = string (Guid.NewGuid()); name = name; created_at = nowIso () }
+                let t =
+                    { id = string (Guid.NewGuid())
+                      pantry_id = pantryId
+                      name = name
+                      created_at = nowIso () }
+
                 t, Some t
 
         if links |> List.exists (fun l -> l.recipe_id = recipeId && l.tag_id = tag.id) then
             tags, links, nothing
         else
-            let link = newRecipeTag recipeId tag.id
+            let link = newRecipeTag pantryId recipeId tag.id
 
             (match newTag with
              | Some t -> tags @ [ t ]
@@ -646,7 +742,10 @@ let addTag (plan: TagPlan) =
         match plan.NewTag with
         | Some tag ->
             let! _ =
-                db.execute ("INSERT INTO tags (id, name, created_at) VALUES (?, ?, ?)", [| tag.id; tag.name; tag.created_at |])
+                db.execute (
+                    "INSERT INTO tags (id, pantry_id, name, created_at) VALUES (?, ?, ?, ?)",
+                    [| tag.id; tag.pantry_id; tag.name; tag.created_at |]
+                )
 
             ()
         | None -> ()
@@ -669,3 +768,71 @@ let deleteTag (id: string) =
         let! _ = db.execute ("DELETE FROM tags WHERE id = ?", [| id |])
         ()
     }
+
+
+// ---------------------------------------------------------------------------
+// Pantries
+// ---------------------------------------------------------------------------
+
+/// Live pantries: the ones this user belongs to, including any still waiting
+/// on approval (the sync rules send the pantry itself straight away, so a
+/// device can name what it is waiting for). Oldest first, which puts the
+/// user's own - made for them at their first sync - at the head.
+let watchPantries (onChange: Pantry list -> unit) =
+    let sql = "SELECT id, user_id, name, created_at FROM pantries ORDER BY created_at, id"
+    let query = db.query<Pantry> {| sql = sql; parameters = [||] |}
+
+    query.watch().registerListener
+        { new WatchedQueryListener<Pantry> with
+            member _.onData(rows) = onChange (List.ofArray rows)
+            member _.onError(err) = JS.console.error ("watch pantries", err) }
+    |> ignore
+
+/// Live memberships of every pantry the user belongs to: their own, and - for
+/// a pantry they own - everyone who is in it or has asked to be. In the order
+/// they were asked for, so the queue an owner works through is the order the
+/// requests came in.
+let watchPantryMembers (onChange: PantryMember list -> unit) =
+    let sql =
+        "SELECT id, pantry_id, user_id, email, name, status, created_at FROM pantry_members ORDER BY created_at, id"
+
+    let query = db.query<PantryMember> {| sql = sql; parameters = [||] |}
+
+    query.watch().registerListener
+        { new WatchedQueryListener<PantryMember> with
+            member _.onData(rows) = onChange (List.ofArray rows)
+            member _.onError(err) = JS.console.error ("watch pantry members", err) }
+    |> ignore
+
+/// Renames the pantry. Only its owner may, which the server enforces; the UI
+/// only offers it to them.
+let renamePantry (id: string) (name: string) =
+    db.execute ("UPDATE pantries SET name = ? WHERE id = ?", [| Shared.Pantry.cleanName name; id |])
+
+/// Asks to join the pantry a QR code named: a membership for this user,
+/// pending until its owner approves it. The row carries the email and name to
+/// be recognised by, since the server only knows the user id.
+///
+/// The pantry itself isn't here yet - it arrives on the next sync, along with
+/// whatever the owner has done with the request - so this writes the one row
+/// and lets sync answer.
+let joinPantry (pantryId: string) (user: User) =
+    db.execute (
+        "INSERT INTO pantry_members (id, pantry_id, user_id, email, name, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [| string (Guid.NewGuid())
+           pantryId
+           user.Id
+           user.Email
+           user.Name
+           Shared.Pantry.Pending
+           nowIso () |]
+    )
+
+/// Lets a member in. The owner's to make, like `removeMember`.
+let approveMember (id: string) =
+    db.execute ("UPDATE pantry_members SET status = ? WHERE id = ?", [| Shared.Pantry.Approved; id |])
+
+/// Takes a member out of the pantry, or turns down a request to join. What
+/// they made in the pantry stays with it; only their way in goes.
+let removeMember (id: string) =
+    db.execute ("DELETE FROM pantry_members WHERE id = ?", [| id |])

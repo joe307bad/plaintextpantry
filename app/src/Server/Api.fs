@@ -14,16 +14,24 @@ let private json (value: IEncodable) : HttpHandler =
         ctx.WriteStringAsync(Encode.toString 0 value)
 
 /// A PowerSync token for the signed-in user. Its `sub` is what the sync
-/// rules filter on (auth.user_id()), so each device only ever downloads its
-/// owner's rows.
+/// rules filter on (auth.user_id()), so each device only ever downloads the
+/// pantries that user belongs to.
+///
+/// Also the one place that makes sure they have a pantry of their own: a
+/// device about to sync needs something to put what it makes into, and this
+/// runs before every connection, so an account that somehow has none (a
+/// first sign-in, a pantry deleted) gets one back.
 let private syncCredentials (config: Config) : HttpHandler =
     fun next ctx ->
-        let user = (Auth.currentUser ctx).Value
+        task {
+            let user = (Auth.currentUser ctx).Value
+            let! _ = Db.ensureOwnPantry config.ConnectionString user.Id user.Email user.Name
 
-        let token =
-            Jwt.create config.JwtSecret "powersync-dev" config.JwtAudience user.Id (TimeSpan.FromHours 1.)
+            let token =
+                Jwt.create config.JwtSecret "powersync-dev" config.JwtAudience user.Id (TimeSpan.FromHours 1.)
 
-        json (Codec.encodeCredentials { Endpoint = config.PowerSyncUrl; Token = token }) next ctx
+            return! json (Codec.encodeCredentials { Endpoint = config.PowerSyncUrl; Token = token }) next ctx
+        }
 
 let private upload (config: Config) : HttpHandler =
     fun next ctx ->

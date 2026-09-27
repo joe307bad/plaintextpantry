@@ -108,6 +108,69 @@ module Tag =
     /// they read as a row of badges.
     let sorted (name: 'tag -> string) (tags: 'tag list) = tags |> List.sortBy (name >> key)
 
+/// A pantry is the household everything belongs to: one person owns it, any
+/// number of people are members of it, and a member may do anything in it.
+/// Everyone gets one of their own ("My Pantry") the first time they sign in;
+/// a second one is joined by scanning its owner's QR code, which asks for
+/// membership and waits for the owner to approve it.
+///
+/// Names are free text and may repeat - two households both called "Home" is
+/// nobody's mistake - so a pantry is told apart by its id, of which the first
+/// section is shown beside the name.
+module Pantry =
+    /// A member who has been let in. The other status is `pending`.
+    [<Literal>]
+    let Approved = "approved"
+
+    /// Asked to join, waiting on the owner.
+    [<Literal>]
+    let Pending = "pending"
+
+    /// The first section of the id: "56dcd3ca" of
+    /// "56dcd3ca-089a-48e6-94e8-f4fcf0acea3c". Enough to tell two pantries
+    /// by the same name apart, short enough to read out.
+    let shortId (id: string) =
+        match id.Split('-') with
+        | [||] -> id
+        | parts -> parts.[0]
+
+    /// How a pantry reads in the header dropdown: "My Pantry · 56dcd3ca".
+    let label (name: string) (id: string) = name.Trim() + " · " + shortId id
+
+    /// What a new user's own pantry is called.
+    [<Literal>]
+    let DefaultName = "My Pantry"
+
+    /// The name as it is stored: as typed, without the surrounding space. A
+    /// blank name would leave nothing to pick in the dropdown, so it falls
+    /// back to what a new pantry is called.
+    let cleanName (name: string) =
+        match name.Trim() with
+        | "" -> DefaultName
+        | name -> name
+
+    /// Who a member is, for the owner to recognise: the name they sign in
+    /// with, their email if they have no name, and failing both the first
+    /// section of their user id. Only their client knows the first two, so a
+    /// member row that hasn't synced yet still says something.
+    let memberName (name: string) (email: string) (userId: string) =
+        match name.Trim(), email.Trim() with
+        | "", "" -> shortId userId
+        | "", email -> email
+        | name, _ -> name
+
+    /// Whether the id looks like a pantry id, which is all a scanned QR code is
+    /// checked against before asking to join it: 8-4-4-4-12 hex.
+    let isId (text: string) =
+        let isHex c =
+            (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+
+        let sections = text.Trim().Split('-')
+        let lengths = [| 8; 4; 4; 4; 12 |]
+
+        sections.Length = lengths.Length
+        && Array.forall2 (fun (s: string) n -> s.Length = n && Seq.forall isHex s) sections lengths
+
 /// One entry from the PowerSync client upload queue, in the shape the
 /// server applies to Postgres. Values are strings (or null); Postgres
 /// casts them to the real column types.

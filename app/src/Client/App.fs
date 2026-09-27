@@ -37,6 +37,7 @@ type Page =
     | RecipeDetail of id: string
     | ShoppingList
     | Menu
+    | Settings
     | Login
     | Terms
     | Privacy
@@ -100,6 +101,20 @@ type Session =
     | SignedOut
     | SignedIn of Shared.User
 
+/// Every row sync has brought down, across every pantry the user belongs to.
+/// The model's own lists (`Recipes` and the rest) hold the current pantry's
+/// share of these, which is what the pages show; switching pantries is
+/// re-filtering them, not re-querying.
+type Synced =
+    { Recipes: Recipe list
+      ShoppingLists: ShoppingList list
+      ShoppingItems: ShoppingItem list
+      Menus: Menu list
+      MenuRecipes: MenuRecipe list
+      MenuSides: MenuSide list
+      Tags: Tag list
+      RecipeTags: RecipeTag list }
+
 type Model =
     { Page: Page
       Session: Session
@@ -150,6 +165,27 @@ type Model =
       /// The shopping-list row being edited in place (after a long press),
       /// and its text as typed so far.
       EditingItem: (string * string) option
+      /// The pantry the pages are showing: what the lists above were filtered
+      /// by, and what everything written goes into. `None` only before the
+      /// first sync has brought one down.
+      Pantry: string option
+      /// Every pantry the user belongs to, oldest first, so their own - made
+      /// for them at their first sync - is the head. A pantry they have only
+      /// asked to join is here too, which is how the header can name it.
+      Pantries: Db.Pantry list
+      /// Who is in those pantries and who has asked to be: their own
+      /// membership of each, and, for a pantry they own, everyone else's.
+      Members: PantryMember list
+      /// The pantry's name as typed on the settings page, `None` unless it is
+      /// being edited (the Save button is for the owner only).
+      PantryNameEdit: string option
+      /// True while the settings page has the camera open on a QR code.
+      Scanning: bool
+      /// Member awaiting confirmation to be taken out of the pantry.
+      PendingMemberRemove: string option
+      /// Everything sync has, which the lists above are the current pantry's
+      /// share of.
+      Synced: Synced
       /// The mobile bottom-sheet menu, toggled by the logo button.
       MenuOpen: bool
       /// Set once a new version is installed and waiting; calling it reloads
@@ -219,6 +255,20 @@ type Msg =
     | ConfirmDelete of id: string
     | CancelDelete
     | DeleteRecipe of id: string
+    | PantriesChanged of Db.Pantry list
+    | PantryMembersChanged of PantryMember list
+    | SelectPantry of id: string option
+    | EditPantryName of string
+    | SavePantryName
+    | SharePantryCode
+    | StartScan
+    | StopScan
+    | Scanned of text: string
+    | ScanFailed of message: string
+    | ApproveMember of id: string
+    | ConfirmMemberRemove of id: string
+    | CancelMemberRemove
+    | RemoveMember of id: string
     | ToggleMenu
     | UpdateAvailable of reload: (unit -> unit)
     /// Starts the exit animation...
@@ -233,6 +283,7 @@ let private parseUrl (segments: string list) =
     | [ "recipe"; id ] -> RecipeDetail id
     | [ "shopping-list" ] -> ShoppingList
     | [ "menu" ] -> Menu
+    | [ "settings" ] -> Settings
     | [ "login" ] -> Login
     | [ "terms" ] -> Terms
     | [ "privacy" ] -> Privacy
@@ -295,6 +346,23 @@ let init () =
       PendingShoppingAdd = None
       EditingItem = None
       NewItem = ""
+      // Which pantry this browser was last left on. Whether it is still one
+      // to show is settled once the pantries themselves arrive.
+      Pantry = Db.PickedPantry.get ()
+      Pantries = []
+      Members = []
+      PantryNameEdit = None
+      Scanning = false
+      PendingMemberRemove = None
+      Synced =
+        { Recipes = []
+          ShoppingLists = []
+          ShoppingItems = []
+          Menus = []
+          MenuRecipes = []
+          MenuSides = []
+          Tags = []
+          RecipeTags = [] }
       MenuOpen = false
       Update = None
       Toast = None },
@@ -308,7 +376,9 @@ let init () =
 /// Once signed in: open the live queries and start syncing.
 let private startSync () =
     Cmd.batch
-        [ Cmd.ofEffect (fun dispatch -> Db.watchRecipes (RecipesChanged >> dispatch))
+        [ Cmd.ofEffect (fun dispatch -> Db.watchPantries (PantriesChanged >> dispatch))
+          Cmd.ofEffect (fun dispatch -> Db.watchPantryMembers (PantryMembersChanged >> dispatch))
+          Cmd.ofEffect (fun dispatch -> Db.watchRecipes (RecipesChanged >> dispatch))
           Cmd.ofEffect (fun dispatch -> Db.watchShoppingLists (ShoppingListsChanged >> dispatch))
           Cmd.ofEffect (fun dispatch -> Db.watchShoppingItems (ShoppingItemsChanged >> dispatch))
           Cmd.ofEffect (fun dispatch -> Db.watchMenus (MenusChanged >> dispatch))
@@ -317,6 +387,162 @@ let private startSync () =
           Cmd.ofEffect (fun dispatch -> Db.watchTags (TagsChanged >> dispatch))
           Cmd.ofEffect (fun dispatch -> Db.watchRecipeTags (RecipeTagsChanged >> dispatch))
           Cmd.ofEffect (fun _ -> Db.connect () |> Promise.catch (fun e -> console.error e) |> ignore) ]
+
+// ---------------------------------------------------------------------------
+// Pantries
+// ---------------------------------------------------------------------------
+
+let private userId (model: Model) =
+    match model.Session with
+    | SignedIn user -> user.Id
+    | _ -> ""
+
+/// One pantry's share of a list of rows. Nothing at all until there is a
+/// pantry to show: every row belongs to one, so an empty list is the honest
+/// answer while the first sync is still on its way.
+let private inPantry (pantry: string option) (pantryOf: 'row -> string) (rows: 'row list) =
+    match pantry with
+    | None -> []
+    | Some id -> rows |> List.filter (fun row -> pantryOf row = id)
+
+/// This user's own membership of each pantry they belong to.
+let private myMemberships (model: Model) =
+    let me = userId model
+    model.Members |> List.filter (fun m -> m.user_id = me)
+
+/// Whether they have been let into a pantry, which is what makes its rows
+/// theirs to see and change.
+let private isApproved (model: Model) (pantryId: string) =
+    myMemberships model
+    |> List.exists (fun m -> m.pantry_id = pantryId && m.status = Shared.Pantry.Approved)
+
+/// The pantry to show: the one picked, while it is still one they are approved
+/// in, and failing that their own - joining a household whose pantry is older
+/// than yours is no reason for the app to open in it. One they have only asked
+/// to join is no candidate at all; none of its rows are here to show.
+let private pantryToShow (model: Model) =
+    match model.Pantry with
+    | Some id when isApproved model id -> Some id
+    | _ ->
+        let me = userId model
+
+        model.Pantries
+        |> List.filter (fun p -> isApproved model p.id)
+        // A stable sort, so within each group they stay oldest first.
+        |> List.sortBy (fun p -> p.user_id <> me)
+        |> List.tryHead
+        |> Option.map (fun p -> p.id)
+
+/// One pantry's rows, keeping anything on screen that the queries haven't
+/// caught up with. A write is shown before its query confirms it (`Recipes =
+/// recipe :: model.Recipes` and friends), and that row is in `shown` but not
+/// yet in `synced`; dropping it would blink it off the page. A row of the
+/// pantry being left, on the other hand, is not kept - it isn't the pantry's.
+let private refilled (idOf: 'row -> string) (pantryOf: 'row -> string) pantry (shown: 'row list) (synced: 'row list) =
+    let confirmed = inPantry pantry pantryOf synced
+    let known = confirmed |> List.map idOf |> Set.ofList
+
+    confirmed
+    @ (inPantry pantry pantryOf shown |> List.filter (fun row -> not (known.Contains(idOf row))))
+
+/// Settles which pantry is current and refills every list from what has
+/// synced. Everything that can change the answer - memberships arriving, the
+/// header switching - ends here, and the pantry landed on is remembered for
+/// the next time this browser opens.
+///
+/// Moving to another pantry also drops what belonged to the one being left:
+/// half-typed rows, the tag filter, the recipe being edited. That happens on a
+/// switch in the header and, just as much, when an approval is taken away and
+/// the app falls back to another pantry under the user's feet. Arriving at the
+/// first pantry of all (`None` until then) leaves everything be: a page opened
+/// straight from a link is waiting for exactly that.
+let private refresh (model: Model) =
+    let pantry = pantryToShow model
+    let synced = model.Synced
+
+    match pantry with
+    | Some id when Some id <> Db.PickedPantry.get () -> Db.PickedPantry.set id
+    | _ -> ()
+
+    let moved = model.Pantry.IsSome && pantry <> model.Pantry
+
+    let model =
+        if not moved then
+            model
+        else
+            // A recipe belongs to the pantry it was opened from, so its page
+            // has nothing left to show.
+            let page =
+                match model.Page with
+                | RecipeDetail _ ->
+                    Router.navigate []
+                    RecipeList
+                | page -> page
+
+            { model with
+                Page = page
+                Edit = None
+                TagFilter = None
+                NewItem = ""
+                NewTag = ""
+                NewSides = Map.empty
+                EditingItem = None
+                EditingTag = None
+                PantryNameEdit = None
+                PendingMemberRemove = None }
+
+    { model with
+        Pantry = pantry
+        Recipes = refilled (fun (r: Recipe) -> r.id) (fun r -> r.pantry_id) pantry model.Recipes synced.Recipes
+        ShoppingLists =
+            refilled (fun (l: ShoppingList) -> l.id) (fun l -> l.pantry_id) pantry model.ShoppingLists synced.ShoppingLists
+        ShoppingItems =
+            refilled (fun (i: ShoppingItem) -> i.id) (fun i -> i.pantry_id) pantry model.ShoppingItems synced.ShoppingItems
+        Menus = refilled (fun (m: Menu) -> m.id) (fun m -> m.pantry_id) pantry model.Menus synced.Menus
+        MenuRecipes =
+            refilled (fun (e: MenuRecipe) -> e.id) (fun e -> e.pantry_id) pantry model.MenuRecipes synced.MenuRecipes
+        MenuSides = refilled (fun (s: MenuSide) -> s.id) (fun s -> s.pantry_id) pantry model.MenuSides synced.MenuSides
+        Tags = refilled (fun (t: Tag) -> t.id) (fun t -> t.pantry_id) pantry model.Tags synced.Tags
+        RecipeTags = refilled (fun (l: RecipeTag) -> l.id) (fun l -> l.pantry_id) pantry model.RecipeTags synced.RecipeTags }
+
+/// One line of the header dropdown. A membership asked for but not yet
+/// approved is here too - that is the point of it, so the wait is visible -
+/// named by its pantry once that has synced, and by its id until then.
+type private PantryChoice = { Id: string; Name: string; Approved: bool }
+
+let private pantryChoices (model: Model) =
+    myMemberships model
+    |> List.map (fun m ->
+        { Id = m.pantry_id
+          Name =
+            model.Pantries
+            |> List.tryFind (fun p -> p.id = m.pantry_id)
+            |> Option.map (fun p -> p.name)
+            |> Option.defaultValue "Pantry"
+          Approved = m.status = Shared.Pantry.Approved })
+
+/// The pantry being shown, as its row, once that has synced.
+let private currentPantry (model: Model) =
+    model.Pantry
+    |> Option.bind (fun id -> model.Pantries |> List.tryFind (fun p -> p.id = id))
+
+/// Whether the user owns the pantry being shown. Renaming it, letting people
+/// in and putting them out are the owner's alone; everything else in a pantry
+/// is any member's.
+let private ownsCurrent (model: Model) =
+    match currentPantry model with
+    | Some pantry -> pantry.user_id = userId model
+    | None -> false
+
+/// Everyone in the current pantry: its owner first, then in the order they
+/// asked to join.
+let private currentMembers (model: Model) =
+    match currentPantry model with
+    | None -> []
+    | Some pantry ->
+        model.Members
+        |> List.filter (fun m -> m.pantry_id = pantry.id)
+        |> List.sortBy (fun m -> (m.user_id <> pantry.user_id), m.created_at, m.id)
 
 let private findRecipe id (recipes: Recipe list) =
     recipes |> List.tryFind (fun r -> r.id = id)
@@ -396,10 +622,11 @@ type private Quantity = Cooklang.Quantity
 let private ingredientsOf (recipe: Recipe) =
     Cooklang.ingredients (Cooklang.parse recipe.body).Recipe
 
-/// Puts a recipe's ingredients on the list, shown at once and persisted after.
+/// Puts a recipe's ingredients on the list, shown at once and persisted
+/// after. The recipe is in the current pantry, so the list is too.
 let private addToShoppingList (recipe: Recipe) (model: Model) =
     let lists, items, plan =
-        Db.planShoppingAdd model.ShoppingLists model.ShoppingItems (ingredientsOf recipe)
+        Db.planShoppingAdd recipe.pantry_id model.ShoppingLists model.ShoppingItems (ingredientsOf recipe)
 
     { model with
         ShoppingLists = lists
@@ -450,37 +677,88 @@ let update msg model =
             DetailTab = RecipeTab
             NewTag = ""
             EditingTag = None
+            PantryNameEdit = None
+            Scanning = false
+            PendingMemberRemove = None
             MenuOpen = false },
         Cmd.none
+    // Each query holds every pantry's rows; the model keeps those and shows
+    // the current pantry's. Only the list that changed is refilled, so a write
+    // already on screen isn't wiped by another query landing before its own.
     | RecipesChanged recipes ->
+        let shown = inPantry model.Pantry (fun (r: Recipe) -> r.pantry_id) recipes
+
         // Populate the detail form once the recipe arrives; never clobber an in-progress edit.
         let edit =
             match model.Page, model.Edit with
-            | RecipeDetail id, None -> findRecipe id recipes |> Option.map formOf
+            | RecipeDetail id, None -> findRecipe id shown |> Option.map formOf
             | _ -> model.Edit
 
-        { model with Recipes = recipes; Edit = edit }, Cmd.none
-    | ShoppingListsChanged lists -> { model with ShoppingLists = lists }, Cmd.none
-    | ShoppingItemsChanged items -> { model with ShoppingItems = items }, Cmd.none
-    | MenusChanged menus -> { model with Menus = menus }, Cmd.none
-    | MenuRecipesChanged entries -> { model with MenuRecipes = entries }, Cmd.none
-    | MenuSidesChanged sides -> { model with MenuSides = sides }, Cmd.none
-    | TagsChanged tags -> { model with Tags = tags }, Cmd.none
-    | RecipeTagsChanged links -> { model with RecipeTags = links }, Cmd.none
+        { model with
+            Synced = { model.Synced with Recipes = recipes }
+            Recipes = shown
+            Edit = edit },
+        Cmd.none
+    | ShoppingListsChanged lists ->
+        { model with
+            Synced = { model.Synced with ShoppingLists = lists }
+            ShoppingLists = inPantry model.Pantry (fun (l: ShoppingList) -> l.pantry_id) lists },
+        Cmd.none
+    | ShoppingItemsChanged items ->
+        { model with
+            Synced = { model.Synced with ShoppingItems = items }
+            ShoppingItems = inPantry model.Pantry (fun (i: ShoppingItem) -> i.pantry_id) items },
+        Cmd.none
+    | MenusChanged menus ->
+        { model with
+            Synced = { model.Synced with Menus = menus }
+            Menus = inPantry model.Pantry (fun (m: Menu) -> m.pantry_id) menus },
+        Cmd.none
+    | MenuRecipesChanged entries ->
+        { model with
+            Synced = { model.Synced with MenuRecipes = entries }
+            MenuRecipes = inPantry model.Pantry (fun (e: MenuRecipe) -> e.pantry_id) entries },
+        Cmd.none
+    | MenuSidesChanged sides ->
+        { model with
+            Synced = { model.Synced with MenuSides = sides }
+            MenuSides = inPantry model.Pantry (fun (s: MenuSide) -> s.pantry_id) sides },
+        Cmd.none
+    | TagsChanged tags ->
+        { model with
+            Synced = { model.Synced with Tags = tags }
+            Tags = inPantry model.Pantry (fun (t: Tag) -> t.pantry_id) tags },
+        Cmd.none
+    | RecipeTagsChanged links ->
+        { model with
+            Synced = { model.Synced with RecipeTags = links }
+            RecipeTags = inPantry model.Pantry (fun (l: RecipeTag) -> l.pantry_id) links },
+        Cmd.none
+    // Which pantries there are, and who is in them, can change which pantry is
+    // current - an approval coming through, a membership taken away - so both
+    // settle everything.
+    | PantriesChanged pantries -> refresh { model with Pantries = pantries }, Cmd.none
+    | PantryMembersChanged members -> refresh { model with Members = members }, Cmd.none
     | NewTagChanged text -> { model with NewTag = text }, Cmd.none
     | AddTag recipeId ->
-        let tags, links, plan = Db.planTagAdd model.Tags model.RecipeTags recipeId model.NewTag
+        match model.Pantry with
+        | None -> model, forgetTyping
+        | Some pantry ->
+            let tags, links, plan = Db.planTagAdd pantry model.Tags model.RecipeTags recipeId model.NewTag
 
-        { model with Tags = tags; RecipeTags = links; NewTag = "" },
-        Cmd.batch [ fireAndForget (Db.addTag plan); forgetTyping ]
+            { model with Tags = tags; RecipeTags = links; NewTag = "" },
+            Cmd.batch [ fireAndForget (Db.addTag plan); forgetTyping ]
     | ToggleTag(recipeId, tagId) ->
         match model.RecipeTags |> List.tryFind (fun l -> l.recipe_id = recipeId && l.tag_id = tagId) with
         | Some link ->
             { model with RecipeTags = model.RecipeTags |> List.filter (fun l -> l.id <> link.id) },
             fireAndForget (Db.removeRecipeTag link.id)
         | None ->
-            let link = Db.newRecipeTag recipeId tagId
-            { model with RecipeTags = model.RecipeTags @ [ link ] }, fireAndForget (Db.addRecipeTag link)
+            match model.Pantry with
+            | None -> model, Cmd.none
+            | Some pantry ->
+                let link = Db.newRecipeTag pantry recipeId tagId
+                { model with RecipeTags = model.RecipeTags @ [ link ] }, fireAndForget (Db.addRecipeTag link)
     | StartEditTag id ->
         match model.Tags |> List.tryFind (fun t -> t.id = id) with
         | Some tag -> { model with EditingTag = Some(id, tag.name) }, Cmd.none
@@ -524,9 +802,9 @@ let update msg model =
     | FilterByTag tagId -> { model with TagFilter = tagId }, Cmd.none
     | NewSideChanged(entryId, text) -> { model with NewSides = model.NewSides.Add(entryId, text) }, Cmd.none
     | AddSide entryId ->
-        match model.NewSides.TryFind entryId with
-        | Some text when text.Trim() <> "" ->
-            let side = Db.newMenuSide entryId text
+        match model.NewSides.TryFind entryId, model.Pantry with
+        | Some text, Some pantry when text.Trim() <> "" ->
+            let side = Db.newMenuSide pantry entryId text
 
             { model with
                 MenuSides = model.MenuSides @ [ side ]
@@ -562,7 +840,7 @@ let update msg model =
         match findRecipe id model.Recipes with
         | None -> model, Cmd.none
         | Some recipe ->
-            let menus, entries, plan = Db.planMenuAdd model.Menus model.MenuRecipes id
+            let menus, entries, plan = Db.planMenuAdd recipe.pantry_id model.Menus model.MenuRecipes id
             let menu = List.head menus
             let model = { model with Menus = menus; MenuRecipes = entries }
 
@@ -605,10 +883,14 @@ let update msg model =
         if model.NewItem.Trim() = "" then
             model, forgetTyping
         else
-            let lists, items, plan = Db.planFreeItemAdd model.ShoppingLists model.ShoppingItems model.NewItem
+            match model.Pantry with
+            | None -> model, forgetTyping
+            | Some pantry ->
+                let lists, items, plan =
+                    Db.planFreeItemAdd pantry model.ShoppingLists model.ShoppingItems model.NewItem
 
-            { model with ShoppingLists = lists; ShoppingItems = items; NewItem = "" },
-            Cmd.batch [ fireAndForget (Db.addToShoppingList plan); forgetTyping ]
+                { model with ShoppingLists = lists; ShoppingItems = items; NewItem = "" },
+                Cmd.batch [ fireAndForget (Db.addToShoppingList plan); forgetTyping ]
     | SetShoppingItemDone(id, isDone) ->
         let items =
             model.ShoppingItems
@@ -687,9 +969,9 @@ let update msg model =
     | NewBodyChanged body ->
         { model with NewRecipe = model.NewRecipe |> Option.map (fun r -> { r with Body = body }) }, Cmd.none
     | AddRecipe ->
-        match model.NewRecipe with
-        | Some r when r.Title.Trim() <> "" ->
-            let recipe = Db.newRecipe (r.Title.Trim()) r.Body
+        match model.NewRecipe, model.Pantry with
+        | Some r, Some pantry when r.Title.Trim() <> "" ->
+            let recipe = Db.newRecipe pantry (r.Title.Trim()) r.Body
 
             { model with
                 NewRecipe = None
@@ -734,6 +1016,85 @@ let update msg model =
 
                 model.MenuSides |> List.filter (fun s -> not (gone.Contains s.menu_recipe_id)) },
         fireAndForget (Db.deleteRecipe id)
+    // `refresh` does the rest: it drops what belonged to the pantry being left
+    // and refills the lists from the new one.
+    | SelectPantry id -> refresh { model with Pantry = id }, Cmd.none
+    | EditPantryName text -> { model with PantryNameEdit = Some text }, Cmd.none
+    | SavePantryName ->
+        match currentPantry model, model.PantryNameEdit with
+        | Some pantry, Some typed when Shared.Pantry.cleanName typed <> pantry.name ->
+            let name = Shared.Pantry.cleanName typed
+
+            let model =
+                { model with
+                    PantryNameEdit = None
+                    Pantries =
+                        model.Pantries
+                        |> List.map (fun p -> if p.id = pantry.id then { p with name = name } else p) }
+
+            let model, showToast = toast $"Pantry renamed to \"{name}\"" model
+            model, Cmd.batch [ fireAndForget (Db.renamePantry pantry.id name); showToast; forgetTyping ]
+        // Nothing typed, or nothing changed: the field just closes.
+        | _ -> { model with PantryNameEdit = None }, forgetTyping
+    | SharePantryCode ->
+        match model.Pantry with
+        | None -> model, Cmd.none
+        | Some id ->
+            let name =
+                currentPantry model
+                |> Option.map (fun p -> p.name)
+                |> Option.defaultValue Shared.Pantry.DefaultName
+
+            model,
+            Cmd.ofEffect (fun _ ->
+                Qr.toDataUrl id
+                |> Promise.bind (Qr.share "pantry-code.png" $"Join {name}" $"Scan this in Plaintext Pantry to join {name}.")
+                |> Promise.catch (fun err -> console.error err)
+                |> Promise.start)
+    | StartScan -> { model with Scanning = true }, Cmd.none
+    | StopScan -> { model with Scanning = false }, Cmd.none
+    | ScanFailed message -> toast message { model with Scanning = false }
+    | Scanned text ->
+        let id = text.Trim()
+        let model = { model with Scanning = false }
+
+        if not (Shared.Pantry.isId id) then
+            toast "That code isn't a pantry" model
+        else
+            match myMemberships model |> List.tryFind (fun m -> m.pantry_id = id) with
+            | Some asked when asked.status = Shared.Pantry.Approved -> toast "You are in that pantry already" model
+            | Some _ -> toast "You have asked to join that one; it is still waiting for approval" model
+            | None ->
+                match model.Session with
+                | SignedIn user ->
+                    // The pantry itself arrives on the next sync, along with
+                    // whatever its owner does about this.
+                    let model, showToast = toast "Asked to join. Waiting for the owner to approve it." model
+                    model, Cmd.batch [ fireAndForget (Db.joinPantry id user); showToast ]
+                | _ -> model, Cmd.none
+    | ApproveMember id ->
+        let members =
+            model.Members
+            |> List.map (fun m -> if m.id = id then { m with status = Shared.Pantry.Approved } else m)
+
+        let who =
+            model.Members
+            |> List.tryFind (fun m -> m.id = id)
+            |> Option.map (fun m -> Shared.Pantry.memberName m.name m.email m.user_id)
+            |> Option.defaultValue "They"
+
+        let model, showToast = toast $"{who} is in" (refresh { model with Members = members })
+        model, Cmd.batch [ fireAndForget (Db.approveMember id); showToast ]
+    | ConfirmMemberRemove id -> { model with PendingMemberRemove = Some id }, Cmd.none
+    | CancelMemberRemove -> { model with PendingMemberRemove = None }, Cmd.none
+    | RemoveMember id ->
+        let members = model.Members |> List.filter (fun m -> m.id <> id)
+
+        refresh
+            { model with
+                Members = members
+                PendingMemberRemove = None },
+        fireAndForget (Db.removeMember id)
     | ToggleMenu -> { model with MenuOpen = not model.MenuOpen }, Cmd.none
     | UpdateAvailable reload -> { model with Update = Some reload }, Cmd.none
     | HideToast seq ->
@@ -767,8 +1128,79 @@ let private onRecipes page =
     | RecipeDetail _ -> true
     | _ -> false
 
+/// The app's line icons: a 24-unit box, stroked in the current colour, so each
+/// takes its size and colour from whatever it sits in.
+let private icon (className: string) (paths: string list) =
+    Svg.svg
+        [ svg.className className
+          svg.viewBox (0, 0, 24, 24)
+          svg.fill "none"
+          svg.stroke "currentColor"
+          svg.strokeWidth 1.6
+          svg.strokeLineCap "round"
+          svg.strokeLineJoin "round"
+          svg.custom ("aria-hidden", "true")
+          svg.children [ for d in paths -> Svg.path [ svg.d d ] ] ]
+
+/// A cog: eight teeth round a hole (Heroicons' cog-6-tooth, MIT).
+let private cogIcon =
+    icon
+        "h-4 w-4"
+        [ "M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 0 1 0 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 0 1 0-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281Z"
+          "M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" ]
+
+/// Out of the box and away: the share sheet.
+let private shareIcon =
+    icon "h-4 w-4" [ "M4 16.5v2A2.5 2.5 0 0 0 6.5 21h11a2.5 2.5 0 0 0 2.5-2.5v-2"; "M16 8l-4-4-4 4"; "M12 4v12" ]
+
+/// A camera, for reading someone else's code.
+let private cameraIcon =
+    icon
+        "h-4 w-4"
+        [ "M4 9a2 2 0 0 1 2-2h1.5l1-1.5h5l1 1.5H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V9Z"
+          "M15 13a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" ]
+
+/// The pantry picker: a plain `select`, borrowing the tag chips' border so it
+/// sits in the header without inventing a new shape. A pantry still waiting on
+/// its owner says so and can't be picked - none of its rows are here to show -
+/// which is the whole point of listing it.
+let private pantrySelect (className: string) (choices: PantryChoice list) (selected: string option) dispatch =
+    Html.select
+        [ prop.className (
+              "border border-gray-300 bg-white px-2 py-0.5 text-sm text-gray-700 hover:bg-gray-50 "
+              + className
+          )
+          prop.ariaLabel "Pantry"
+          prop.value (defaultArg selected "")
+          prop.onChange (fun (value: string) ->
+              dispatch (SelectPantry(if value = "" then None else Some value)))
+          prop.children
+              [ // Nothing to pick until the first sync brings a pantry down.
+                if selected.IsNone then
+                    Html.option [ prop.value ""; prop.text "Select a pantry" ]
+
+                for choice in choices do
+                    Html.option
+                        [ prop.key choice.Id
+                          prop.value choice.Id
+                          prop.disabled (not choice.Approved)
+                          prop.text (
+                              Shared.Pantry.label choice.Name choice.Id
+                              + (if choice.Approved then "" else " (pending approval)")
+                          ) ] ] ]
+
+/// The way to the settings page, beside the pantry it is about.
+let private settingsCog (className: string) (isActive: bool) dispatch =
+    Html.a (
+        linkProps
+            ("shrink-0 " + className + " " + (if isActive then "text-gray-900" else "text-gray-500 hover:text-gray-900"))
+            dispatch
+            [ "settings" ]
+        @ [ prop.ariaLabel "Pantry settings"; prop.title "Pantry settings"; prop.children [ cogIcon ] ]
+    )
+
 /// Desktop: the bar across the top. Hidden on phones, where `mobileMenu` takes over.
-let private navBar (page: Page) (user: Shared.User) dispatch =
+let private navBar (page: Page) (user: Shared.User) (choices: PantryChoice list) (pantry: string option) dispatch =
     // `nav-link` (index.css) reserves the bold width from a hidden copy of the
     // text in `data-text`, so the active link going bold shifts nothing.
     let navLink segments (text: string) isActive =
@@ -797,7 +1229,9 @@ let private navBar (page: Page) (user: Shared.User) dispatch =
                 navLink [] "Recipes" (onRecipes page)
                 navLink [ "shopping-list" ] "Shopping list" (page = ShoppingList)
                 navLink [ "menu" ] "Menu" (page = Menu)
-                Html.span [ prop.className "ml-auto text-sm text-gray-500"; prop.text user.Email ]
+                pantrySelect "ml-auto" choices pantry dispatch
+                settingsCog "" (page = Settings) dispatch
+                Html.span [ prop.className "text-sm text-gray-500"; prop.text user.Email ]
                 Html.button
                     [ prop.className "text-sm text-gray-500 hover:text-gray-900"
                       prop.text "Sign out"
@@ -806,7 +1240,7 @@ let private navBar (page: Page) (user: Shared.User) dispatch =
 /// Phones: no top bar. The logo sits bottom-right (the one round button in the
 /// app) and toggles a bottom sheet holding the same links. Navigating closes
 /// it (see UrlChanged).
-let private mobileMenu (page: Page) (user: Shared.User) (isOpen: bool) dispatch =
+let private mobileMenu (page: Page) (user: Shared.User) (choices: PantryChoice list) (pantry: string option) (isOpen: bool) dispatch =
     let navLink segments text isActive =
         linkWith
             ("block py-3 text-lg " + if isActive then "font-semibold text-gray-900" else "text-gray-600")
@@ -829,6 +1263,14 @@ let private mobileMenu (page: Page) (user: Shared.User) (isOpen: bool) dispatch 
                               [ navLink [] "Recipes" (onRecipes page)
                                 navLink [ "shopping-list" ] "Shopping list" (page = ShoppingList)
                                 navLink [ "menu" ] "Menu" (page = Menu)
+                                // Under the links, where the header's top-right
+                                // corner lands on a phone. The cog keeps its
+                                // place beside the pantry.
+                                Html.div
+                                    [ prop.className "mt-3 flex items-center gap-3"
+                                      prop.children
+                                          [ pantrySelect "min-w-0 flex-1" choices pantry dispatch
+                                            settingsCog "p-1" (page = Settings) dispatch ] ]
                                 Html.div
                                     [ prop.className "mt-3 flex items-center justify-between border-t border-gray-200 pt-4"
                                       prop.children
@@ -1858,6 +2300,231 @@ let private menuPage (model: Model) dispatch =
           | Some(entry, recipe) -> confirmMenuRemoveModal entry recipe dispatch
           | None -> Html.none ]
 
+// ---------------------------------------------------------------------------
+// Settings: the pantry in the header
+// ---------------------------------------------------------------------------
+
+/// The current pantry's id as a QR code. Its own component because drawing one
+/// is a promise: the id goes in and a PNG comes back a tick later.
+[<ReactComponent>]
+let private PantryCode (id: string) =
+    let src, setSrc = React.useState ""
+
+    React.useEffect ((fun () -> Qr.toDataUrl id |> Promise.iter setSrc), [| box id |])
+
+    Html.div
+        [ prop.className "flex h-40 w-40 items-center justify-center border border-gray-200 bg-white"
+          prop.children
+              [ if src = "" then
+                    Html.span [ prop.className "text-sm text-gray-400"; prop.text "Drawing…" ]
+                else
+                    Html.img
+                        [ prop.className "h-full w-full"
+                          prop.src src
+                          prop.alt $"QR code for pantry {Shared.Pantry.shortId id}" ] ] ]
+
+/// The camera, over the page, while a code is being read. A component of its
+/// own so the video element is on screen before the camera is handed it, and
+/// so however the scanner closes - the code read, Cancel, the backdrop, or
+/// leaving the page - the camera goes off with it.
+[<ReactComponent>]
+let private ScanPanel (onFound: string -> unit, onError: string -> unit, onCancel: unit -> unit) =
+    let video = React.useElementRef ()
+    // Refs so the camera, started once, always calls the latest of these.
+    let found = React.useRef onFound
+    found.current <- onFound
+    let failed = React.useRef onError
+    failed.current <- onError
+
+    let mount () : unit -> unit =
+        match video.current with
+        | Some el -> Qr.scan (unbox el) (fun text -> found.current text) (fun message -> failed.current message)
+        | None -> id
+
+    React.useEffect (mount, [||])
+
+    Html.div
+        [ prop.className "fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          prop.onClick (fun _ -> onCancel ())
+          prop.children
+              [ Html.div
+                    [ prop.className "flex w-full max-w-sm flex-col gap-3 rounded bg-white p-4"
+                      prop.onClick (fun e -> e.stopPropagation ())
+                      prop.children
+                          [ Html.p
+                                [ prop.className "text-sm text-gray-600"
+                                  prop.text "Point the camera at a pantry's QR code." ]
+                            Html.video
+                                [ prop.ref video
+                                  prop.className "aspect-square w-full bg-black object-cover"
+                                  prop.muted true
+                                  // iOS plays video full screen unless told not to.
+                                  prop.custom ("playsInline", true) ]
+                            Html.div
+                                [ prop.className "flex justify-end"
+                                  prop.children
+                                      [ Html.button
+                                            [ prop.type' "button"
+                                              prop.className "px-3 py-1 text-gray-600 hover:text-gray-900"
+                                              prop.text "Cancel"
+                                              prop.onClick (fun _ -> onCancel ()) ] ] ] ] ] ] ]
+
+/// Taking someone out of a pantry, or turning down their request: both lose
+/// them their way in, so both are asked about first.
+let private confirmMemberRemoveModal (entry: PantryMember) dispatch =
+    let who = Shared.Pantry.memberName entry.name entry.email entry.user_id
+
+    if entry.status = Shared.Pantry.Approved then
+        confirmModal
+            $"Take {who} out of this pantry? What they have added to it stays."
+            "Remove"
+            Danger
+            CancelMemberRemove
+            (RemoveMember entry.id)
+            dispatch
+    else
+        confirmModal
+            $"Turn down {who}'s request to join?"
+            "Turn down"
+            Danger
+            CancelMemberRemove
+            (RemoveMember entry.id)
+            dispatch
+
+/// One person in the pantry: who they are, then what is true of them (you, the
+/// owner, still waiting), then what the owner can do about it. The actions
+/// follow the name rather than float at the far edge, as they do on a tag row.
+let private memberRow (entry: PantryMember) (isOwner: bool) (isMe: bool) (canManage: bool) dispatch =
+    let badge (text: string) =
+        Html.span [ prop.className "bg-gray-100 px-1.5 py-0.5 text-xs text-gray-600"; prop.text text ]
+
+    let pending = entry.status <> Shared.Pantry.Approved
+
+    Html.li
+        [ prop.key entry.id
+          prop.className "flex items-center gap-2 py-1"
+          prop.children
+              [ Html.span
+                    [ prop.className "min-w-0 truncate"
+                      prop.text (Shared.Pantry.memberName entry.name entry.email entry.user_id) ]
+                if isOwner then badge "Owner"
+                if isMe then badge "You"
+                if pending then badge "Pending approval"
+
+                if canManage && pending then
+                    Html.button
+                        [ prop.type' "button"
+                          prop.className "border border-gray-300 px-2 py-0.5 text-sm text-gray-700 hover:bg-gray-50"
+                          prop.text "Approve"
+                          prop.onClick (fun _ -> dispatch (ApproveMember entry.id)) ]
+
+                if canManage then
+                    Html.button
+                        [ prop.type' "button"
+                          prop.className "icon-btn px-1 text-gray-400 hover:text-red-600"
+                          prop.title (if pending then "Turn down" else "Remove from pantry")
+                          prop.text "×"
+                          prop.onClick (fun _ -> dispatch (ConfirmMemberRemove entry.id)) ] ] ]
+
+/// The settings page: the pantry the header is on. Its name, the code that
+/// lets someone else in, and everyone who is in it or has asked to be.
+/// Renaming and letting people in belong to the owner; a member sees the same
+/// page without those.
+let private settingsPage (model: Model) dispatch =
+    let owner = ownsCurrent model
+    let section = "text-sm font-semibold text-gray-500"
+
+    Html.div
+        [ prop.className "flex max-w-2xl flex-col gap-6"
+          prop.children
+              [ match currentPantry model with
+                | None ->
+                    Html.p
+                        [ prop.className "text-gray-500"
+                          prop.text "Your pantry hasn't arrived yet. It will be here as soon as this device has synced." ]
+                | Some pantry ->
+                    Html.div
+                        [ prop.className "flex flex-col gap-2"
+                          prop.children
+                              [ Html.h2 [ prop.className "text-lg font-semibold"; prop.text "Pantry" ]
+                                if owner then
+                                    // A form of its own, so Enter saves the name
+                                    // and nothing else on the page.
+                                    Html.form
+                                        [ prop.className "flex items-center gap-2"
+                                          prop.onSubmit (fun e ->
+                                              e.preventDefault ()
+                                              dispatch SavePantryName)
+                                          prop.children
+                                              [ Html.input
+                                                    [ prop.className "min-w-0 flex-1 rounded border border-gray-300 px-2 py-1"
+                                                      prop.type' "text"
+                                                      prop.ariaLabel "Pantry name"
+                                                      prop.autoComplete "off"
+                                                      prop.value (defaultArg model.PantryNameEdit pantry.name)
+                                                      prop.onChange (EditPantryName >> dispatch) ]
+                                                Html.button
+                                                    [ prop.type' "submit"
+                                                      prop.className "bg-blue-600 px-3 py-1 text-white hover:bg-blue-700"
+                                                      prop.text "Save" ] ] ]
+                                else
+                                    Html.p [ prop.className "font-semibold"; prop.text pantry.name ]
+                                // The whole id, not the short form the header
+                                // shows: this is the one to read out or type.
+                                Html.p [ prop.className "text-sm break-all text-gray-500"; prop.text pantry.id ]
+                                if not owner then
+                                    Html.p
+                                        [ prop.className "text-sm text-gray-500"
+                                          prop.text "Its owner looks after the name and who is in it. Everything inside it is yours to change." ] ] ]
+                    Html.div
+                        [ prop.className "flex flex-col gap-2"
+                          prop.children
+                              [ Html.h3 [ prop.className section; prop.text "Pantry code" ]
+                                PantryCode pantry.id
+                                Html.p
+                                    [ prop.className "max-w-sm text-sm text-gray-500"
+                                      prop.text
+                                          (if owner then
+                                               "Anyone who scans this asks to join. They are in once you approve them below."
+                                           else
+                                               "Anyone who scans this asks to join, and the owner lets them in.") ]
+                                Html.div
+                                    [ prop.className "flex items-center gap-2"
+                                      prop.children
+                                          [ Html.button
+                                                [ prop.type' "button"
+                                                  prop.className
+                                                      "icon-btn flex h-9 w-9 items-center justify-center border border-gray-300 text-gray-600 hover:bg-gray-50"
+                                                  prop.title "Share this pantry's code"
+                                                  prop.ariaLabel "Share this pantry's code"
+                                                  prop.onClick (fun _ -> dispatch SharePantryCode)
+                                                  prop.children [ shareIcon ] ]
+                                            Html.button
+                                                [ prop.type' "button"
+                                                  prop.className
+                                                      "icon-btn flex h-9 w-9 items-center justify-center border border-gray-300 text-gray-600 hover:bg-gray-50"
+                                                  prop.title "Scan a pantry's code"
+                                                  prop.ariaLabel "Scan a pantry's code"
+                                                  prop.onClick (fun _ -> dispatch StartScan)
+                                                  prop.children [ cameraIcon ] ] ] ] ] ]
+                    Html.div
+                        [ prop.className "flex flex-col gap-1"
+                          prop.children
+                              [ Html.h3 [ prop.className section; prop.text "Members" ]
+                                Html.ul
+                                    [ prop.className "flex flex-col gap-1"
+                                      prop.children
+                                          [ for entry in currentMembers model ->
+                                                memberRow
+                                                    entry
+                                                    (entry.user_id = pantry.user_id)
+                                                    (entry.user_id = userId model)
+                                                    // The owner is in the pantry
+                                                    // for good; everyone else is
+                                                    // theirs to add and remove.
+                                                    (owner && entry.user_id <> pantry.user_id)
+                                                    dispatch ] ] ] ] ] ]
+
 [<ReactComponent>]
 let View () =
     let model, dispatch = React.useElmish (init, update)
@@ -1883,8 +2550,10 @@ let View () =
     | SignedIn _, Login -> Html.none
     | SignedIn user, _ ->
         Html.div
-            [ navBar model.Page user dispatch
-              mobileMenu model.Page user model.MenuOpen dispatch
+            [ let choices = pantryChoices model
+
+              navBar model.Page user choices model.Pantry dispatch
+              mobileMenu model.Page user choices model.Pantry model.MenuOpen dispatch
               Html.main
                   [ // Enough bottom padding that the last row scrolls clear of the
                     // fixed "Created" pill and menu button.
@@ -1895,6 +2564,7 @@ let View () =
                           | RecipeDetail id -> detailPage model id known dispatch
                           | ShoppingList -> shoppingListPage model dispatch
                           | Menu -> menuPage model dispatch
+                          | Settings -> settingsPage model dispatch
                           | Login
                           | Terms
                           | Privacy -> Html.none
@@ -1909,6 +2579,15 @@ let View () =
               | Some tag ->
                   confirmTagDeleteModal tag (model.RecipeTags |> List.filter (fun l -> l.tag_id = tag.id) |> List.length) dispatch
               | None -> Html.none
+              match model.PendingMemberRemove |> Option.bind (fun id -> model.Members |> List.tryFind (fun m -> m.id = id)) with
+              | Some entry -> confirmMemberRemoveModal entry dispatch
+              | None -> Html.none
+              if model.Scanning then
+                  ScanPanel(
+                      (fun text -> dispatch (Scanned text)),
+                      (fun message -> dispatch (ScanFailed message)),
+                      (fun () -> dispatch StopScan)
+                  )
               match model.PendingArchive with
               | Some CurrentShoppingList ->
                   match currentList model with

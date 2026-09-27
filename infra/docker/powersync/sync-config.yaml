@@ -5,30 +5,50 @@
 config:
   edition: 3
 
-# Each client syncs only its own rows. auth.user_id() is the `sub` of the JWT
-# the F# server mints at /api/sync/credentials, i.e. the Keycloak subject.
+# Each client syncs the pantries it is an approved member of, and their rows.
+# auth.user_id() is the `sub` of the JWT the F# server mints at
+# /api/sync/credentials, i.e. the Keycloak subject.
+#
+# Approval is the line. Until it comes through, a device gets its own pending
+# membership row and nothing else: not the pantry's name, not the email
+# addresses of the people already in it. Knowing a pantry's id is enough to ask
+# to join, so it must not also be enough to read who is in it.
 streams:
+  pantries:
+    auto_subscribe: true
+    query: SELECT * FROM pantries WHERE id IN (SELECT pantry_id FROM pantry_members WHERE user_id = auth.user_id() AND status = 'approved')
+  # Everyone in a pantry sees who else is in it; the owner also needs the
+  # pending rows, to have something to approve.
+  pantry_members:
+    auto_subscribe: true
+    query: SELECT * FROM pantry_members WHERE pantry_id IN (SELECT pantry_id FROM pantry_members WHERE user_id = auth.user_id() AND status = 'approved')
+  # Your own memberships, whatever state they are in: the row a scan just wrote
+  # has to come back, or the header would have no pantry to show as pending and
+  # sync would take the local row away again.
+  my_memberships:
+    auto_subscribe: true
+    query: SELECT * FROM pantry_members WHERE user_id = auth.user_id()
   recipes:
     auto_subscribe: true
-    query: SELECT * FROM recipes WHERE user_id = auth.user_id()
+    query: SELECT * FROM recipes WHERE pantry_id IN (SELECT pantry_id FROM pantry_members WHERE user_id = auth.user_id() AND status = 'approved')
   shopping_lists:
     auto_subscribe: true
-    query: SELECT * FROM shopping_lists WHERE user_id = auth.user_id()
+    query: SELECT * FROM shopping_lists WHERE pantry_id IN (SELECT pantry_id FROM pantry_members WHERE user_id = auth.user_id() AND status = 'approved')
   shopping_items:
     auto_subscribe: true
-    query: SELECT * FROM shopping_items WHERE user_id = auth.user_id()
+    query: SELECT * FROM shopping_items WHERE pantry_id IN (SELECT pantry_id FROM pantry_members WHERE user_id = auth.user_id() AND status = 'approved')
   menus:
     auto_subscribe: true
-    query: SELECT * FROM menus WHERE user_id = auth.user_id()
+    query: SELECT * FROM menus WHERE pantry_id IN (SELECT pantry_id FROM pantry_members WHERE user_id = auth.user_id() AND status = 'approved')
   menu_recipes:
     auto_subscribe: true
-    query: SELECT * FROM menu_recipes WHERE user_id = auth.user_id()
+    query: SELECT * FROM menu_recipes WHERE pantry_id IN (SELECT pantry_id FROM pantry_members WHERE user_id = auth.user_id() AND status = 'approved')
   menu_sides:
     auto_subscribe: true
-    query: SELECT * FROM menu_sides WHERE user_id = auth.user_id()
+    query: SELECT * FROM menu_sides WHERE pantry_id IN (SELECT pantry_id FROM pantry_members WHERE user_id = auth.user_id() AND status = 'approved')
   tags:
     auto_subscribe: true
-    query: SELECT * FROM tags WHERE user_id = auth.user_id()
+    query: SELECT * FROM tags WHERE pantry_id IN (SELECT pantry_id FROM pantry_members WHERE user_id = auth.user_id() AND status = 'approved')
   recipe_tags:
     auto_subscribe: true
-    query: SELECT * FROM recipe_tags WHERE user_id = auth.user_id()
+    query: SELECT * FROM recipe_tags WHERE pantry_id IN (SELECT pantry_id FROM pantry_members WHERE user_id = auth.user_id() AND status = 'approved')

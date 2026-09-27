@@ -171,6 +171,14 @@ type PantryTools(config: Config, http: IHttpContextAccessor) =
         if not (Set.contains scope scopes) then
             raise (noScope scope)
 
+    /// The pantry an assistant's writes go into: the caller's own. A device's
+    /// first sync ordinarily makes it, so this is for the account that has
+    /// only ever been reached through MCP and has no pantry yet. Called before
+    /// anything that starts a recipe, list or menu; rows that hang off one of
+    /// those take their pantry from it.
+    let ensurePantry () =
+        Db.ensureOwnPantry cs user.Id user.Email user.Name
+
     /// The current list's id, creating today's list when there is none.
     let currentListId () =
         task {
@@ -178,7 +186,9 @@ type PantryTools(config: Config, http: IHttpContextAccessor) =
 
             match list with
             | Some l -> return l.Id
-            | None -> return! Db.insertShoppingList cs user.Id (Shared.ShoppingList.defaultName DateTime.Now)
+            | None ->
+                let! _ = ensurePantry ()
+                return! Db.insertShoppingList cs user.Id (Shared.ShoppingList.defaultName DateTime.Now)
         }
 
     /// The current menu's id, creating today's menu when there is none.
@@ -188,7 +198,9 @@ type PantryTools(config: Config, http: IHttpContextAccessor) =
 
             match menu with
             | Some m -> return m.Id
-            | None -> return! Db.insertMenu cs user.Id (Shared.Menu.defaultName DateTime.Now (Random()))
+            | None ->
+                let! _ = ensurePantry ()
+                return! Db.insertMenu cs user.Id (Shared.Menu.defaultName DateTime.Now (Random()))
         }
 
     /// Every recipe's title with the ingredient names its Cooklang parses to:
@@ -256,6 +268,7 @@ type PantryTools(config: Config, http: IHttpContextAccessor) =
         : Task<Recipe> =
         task {
             require "recipes:write"
+            let! _ = ensurePantry ()
             let! id = Db.insertRecipe cs user.Id title body
             let! row = Db.getRecipe cs user.Id id
             return recipe [] row.Value
