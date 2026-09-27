@@ -1131,9 +1131,9 @@ let private listPage (model: Model) (known: CooklangEditor.KnownNames) dispatch 
                         [ for r in recipes ->
                               Html.li
                                   [ prop.key r.id
-                                    // Wraps, so a recipe with a few tags on it
-                                    // takes a second line instead of overflowing.
-                                    prop.className "flex flex-wrap items-center gap-2"
+                                    // Wraps at md, so a recipe with a few tags on
+                                    // it takes a second line instead of overflowing.
+                                    prop.className "flex items-start gap-2 md:flex-wrap md:items-center"
                                     prop.children
                                         [ // Same box as the number on the menu page, so the
                                           // + here and the × there share a column.
@@ -1149,8 +1149,25 @@ let private listPage (model: Model) (known: CooklangEditor.KnownNames) dispatch 
                                                 prop.title "Add to menu"
                                                 prop.text "+"
                                                 prop.onClick (fun _ -> dispatch (AddToMenu r.id)) ]
-                                          linkWith "text-blue-600 underline hover:text-blue-800" dispatch [ "recipe"; r.id ] r.title
-                                          yield! tagBadges (tagsOf model r.id) ] ] ] ]
+                                          // Phones: the tags go under the title, indented a
+                                          // little, so a long title and its tags don't fight
+                                          // over the one line. `contents` hands both back to
+                                          // the row at md, where each badge wraps on its own
+                                          // as it did before.
+                                          Html.div
+                                              [ prop.className "flex min-w-0 flex-1 flex-col items-start gap-1 md:contents"
+                                                prop.children
+                                                    [ linkWith
+                                                          "text-blue-600 underline hover:text-blue-800"
+                                                          dispatch
+                                                          [ "recipe"; r.id ]
+                                                          r.title
+                                                      match tagsOf model r.id with
+                                                      | [] -> Html.none
+                                                      | tags ->
+                                                          Html.div
+                                                              [ prop.className "flex flex-wrap gap-2 pl-3 md:contents"
+                                                                prop.children (tagBadges tags) ] ] ] ] ] ] ]
           match model.NewRecipe with
           | Some recipe -> newRecipeModal recipe known dispatch
           | None -> Html.none ]
