@@ -102,6 +102,38 @@
     -webkit-touch-callout: none;
     touch-action: manipulation;
   }
+  /* The recipe list's header stays put while the recipes scroll under it, so
+     the tags stay in reach the whole way down. `main` has already padded the
+     page down past the status bar; this cancels that padding and lays it out
+     again inside itself, so when the bar pins to top: 0 its own white padding
+     covers the strip the rows would otherwise show through. Phones only - on a
+     desktop there is a nav bar up there and the page is short. */
+  .pinned-bar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    margin-inline: calc(--spacing(4) * -1);
+    margin-top: calc((--spacing(3) + env(safe-area-inset-top, 0px)) * -1);
+    padding-inline: --spacing(4);
+    padding-top: calc(--spacing(3) + env(safe-area-inset-top, 0px));
+    padding-bottom: --spacing(2);
+    background-color: white;
+  }
+  @media (width >= 48rem) {
+    .pinned-bar {
+      position: static;
+      margin: 0;
+      padding: 0;
+    }
+  }
+  /* The tag chips scroll sideways under the finger when there are more than
+     fit; no scrollbar, since the row is short and the chips say there is more. */
+  .no-scrollbar {
+    scrollbar-width: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
 }
 
 /* Mobile menu: the sheet slides up and the backdrop fades, fast enough to

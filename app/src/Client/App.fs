@@ -1529,6 +1529,10 @@ let private tagBadges (tags: Tag list) =
 /// one being filtered by filled in. Tapping a tag shows only the recipes
 /// carrying it; tapping it again, or "All", shows the lot. Tags are made and
 /// named on a recipe's Tags tab, so there is nothing to add here.
+///
+/// On a phone this shares its line with the "New Recipe" button, so it takes
+/// the space left over and scrolls sideways through however many tags there
+/// are. At md it goes back to a line of its own and wraps.
 let private tagFilterBar (tags: Tag list) (selected: string option) dispatch =
     match tags with
     | [] -> Html.none
@@ -1538,7 +1542,7 @@ let private tagFilterBar (tags: Tag list) (selected: string option) dispatch =
             Html.button
                 [ prop.type' "button"
                   prop.className (
-                      "border px-2 py-0.5 text-sm "
+                      "shrink-0 border px-2 py-0.5 text-sm "
                       + if isActive then
                             "border-brand bg-brand font-semibold text-white"
                         else
@@ -1548,7 +1552,8 @@ let private tagFilterBar (tags: Tag list) (selected: string option) dispatch =
                   prop.onClick (fun _ -> dispatch msg) ]
 
         Html.div
-            [ prop.className "mb-3 flex flex-wrap items-center gap-2"
+            [ prop.className
+                  "no-scrollbar flex min-w-0 flex-1 items-center gap-2 overflow-x-auto md:mb-3 md:flex-wrap md:overflow-visible"
               prop.children
                   [ chip "All" selected.IsNone (FilterByTag None)
                     for tag in Shared.Tag.sorted (fun (t: Tag) -> t.name) tags do
@@ -1557,12 +1562,19 @@ let private tagFilterBar (tags: Tag list) (selected: string option) dispatch =
 
 let private listPage (model: Model) (known: CooklangEditor.KnownNames) dispatch =
     Html.div
-        [ Html.button
-              [ prop.type' "button"
-                prop.className "mb-3 bg-brand px-3 py-1 font-semibold text-white hover:shadow-md hover:shadow-brand/30"
-                prop.text "New Recipe"
-                prop.onClick (fun _ -> dispatch OpenNewRecipe) ]
-          tagFilterBar model.Tags (activeTag model) dispatch
+        [ // On a phone the button and the tags share one line, pinned to the top
+          // so the tags stay in reach however far down the list you have got. At
+          // md the two stack again, as a bar of their own above the recipes.
+          Html.div
+              [ prop.className "pinned-bar mb-3 flex items-center gap-2 md:mb-0 md:block"
+                prop.children
+                    [ Html.button
+                          [ prop.type' "button"
+                            prop.className
+                                "shrink-0 bg-brand px-3 py-1 font-semibold text-white hover:shadow-md hover:shadow-brand/30 md:mb-3"
+                            prop.text "New Recipe"
+                            prop.onClick (fun _ -> dispatch OpenNewRecipe) ]
+                      tagFilterBar model.Tags (activeTag model) dispatch ] ]
           match shownRecipes model with
           | [] when not model.Recipes.IsEmpty -> Html.p "No recipes with that tag."
           | [] -> Html.p "No recipes yet."
