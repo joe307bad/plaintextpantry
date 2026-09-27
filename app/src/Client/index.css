@@ -136,6 +136,21 @@
   }
 }
 
+/* The waiting screen, while the first sync brings a pantry down. Its own
+   keyframes, so Tailwind's `animate-spin` turning up later can't clash. */
+@keyframes spinner {
+  to { transform: rotate(360deg); }
+}
+.spinner {
+  display: block;
+  width: 1.25rem;
+  height: 1.25rem;
+  border: 2px solid var(--color-gray-200);
+  border-top-color: var(--color-brand);
+  border-radius: 9999px;
+  animation: spinner 700ms linear infinite;
+}
+
 /* Mobile menu: the sheet slides up and the backdrop fades, fast enough to
    read as immediate but with enough motion to show where it came from. */
 @keyframes sheet-in {

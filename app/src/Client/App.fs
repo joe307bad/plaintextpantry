@@ -176,6 +176,9 @@ type Model =
       /// Who is in those pantries and who has asked to be: their own
       /// membership of each, and, for a pantry they own, everyone else's.
       Members: PantryMember list
+      /// True once the membership query has reported, which is what makes an
+      /// empty `Members` mean "in no pantry" rather than "not asked yet".
+      MembershipsKnown: bool
       /// The pantry's name as typed on the settings page, `None` unless it is
       /// being edited (the Save button is for the owner only).
       PantryNameEdit: string option
@@ -186,6 +189,9 @@ type Model =
       /// Everything sync has, which the lists above are the current pantry's
       /// share of.
       Synced: Synced
+      /// True while sync can't reach the server. Only the waiting screen reads
+      /// it, to tell a first sync still on its way from one that can't be made.
+      SyncFailing: bool
       /// The mobile bottom-sheet menu, toggled by the logo button.
       MenuOpen: bool
       /// Set once a new version is installed and waiting; calling it reloads
@@ -255,6 +261,9 @@ type Msg =
     | ConfirmDelete of id: string
     | CancelDelete
     | DeleteRecipe of id: string
+    | SyncFailingChanged of bool
+    /// Reconnects the sync stream by hand, from the waiting screen.
+    | Resync
     | PantriesChanged of Db.Pantry list
     | PantryMembersChanged of PantryMember list
     | SelectPantry of id: string option
@@ -351,6 +360,7 @@ let init () =
       Pantry = Db.PickedPantry.get ()
       Pantries = []
       Members = []
+      MembershipsKnown = false
       PantryNameEdit = None
       Scanning = false
       PendingMemberRemove = None
@@ -363,6 +373,7 @@ let init () =
           MenuSides = []
           Tags = []
           RecipeTags = [] }
+      SyncFailing = false
       MenuOpen = false
       Update = None
       Toast = None },
@@ -376,7 +387,9 @@ let init () =
 /// Once signed in: open the live queries and start syncing.
 let private startSync () =
     Cmd.batch
-        [ Cmd.ofEffect (fun dispatch -> Db.watchPantries (PantriesChanged >> dispatch))
+        [ Cmd.ofEffect (fun dispatch -> Db.watchSyncFailing (SyncFailingChanged >> dispatch))
+          Cmd.ofEffect (fun _ -> Db.keepSynced ())
+          Cmd.ofEffect (fun dispatch -> Db.watchPantries (PantriesChanged >> dispatch))
           Cmd.ofEffect (fun dispatch -> Db.watchPantryMembers (PantryMembersChanged >> dispatch))
           Cmd.ofEffect (fun dispatch -> Db.watchRecipes (RecipesChanged >> dispatch))
           Cmd.ofEffect (fun dispatch -> Db.watchShoppingLists (ShoppingListsChanged >> dispatch))
@@ -457,7 +470,11 @@ let private refilled (idOf: 'row -> string) (pantryOf: 'row -> string) pantry (s
 /// first pantry of all (`None` until then) leaves everything be: a page opened
 /// straight from a link is waiting for exactly that.
 let private refresh (model: Model) =
-    let pantry = pantryToShow model
+    // The memberships are what decide which pantry to show, and the pantries
+    // query can land before them. Answering `None` in that gap would throw an
+    // app that has its data already back to the waiting screen, so until the
+    // memberships have reported the pantry this browser was left on stands.
+    let pantry = if model.MembershipsKnown then pantryToShow model else model.Pantry
     let synced = model.Synced
 
     match pantry with
@@ -734,11 +751,18 @@ let update msg model =
             Synced = { model.Synced with RecipeTags = links }
             RecipeTags = inPantry model.Pantry (fun (l: RecipeTag) -> l.pantry_id) links },
         Cmd.none
+    | SyncFailingChanged failing -> { model with SyncFailing = failing }, Cmd.none
+    | Resync -> model, fireAndForget (Db.resync ())
     // Which pantries there are, and who is in them, can change which pantry is
     // current - an approval coming through, a membership taken away - so both
     // settle everything.
     | PantriesChanged pantries -> refresh { model with Pantries = pantries }, Cmd.none
-    | PantryMembersChanged members -> refresh { model with Members = members }, Cmd.none
+    | PantryMembersChanged members ->
+        refresh
+            { model with
+                Members = members
+                MembershipsKnown = true },
+        Cmd.none
     | NewTagChanged text -> { model with NewTag = text }, Cmd.none
     | AddTag recipeId ->
         match model.Pantry with
@@ -1355,6 +1379,53 @@ let private loginPage dispatch =
                                       "inline-flex items-center gap-2.5 bg-brand px-4 py-2.5 text-sm font-semibold leading-none text-white hover:shadow-md hover:shadow-brand/30"
                                   prop.onClick (fun _ -> dispatch SignIn)
                                   prop.children [ googleIcon; Html.span [ prop.className "pt-px"; prop.text "Login with Google" ] ] ] ] ]
+                legalFooter dispatch ] ]
+
+/// Signed in with no pantry to show yet. Everything in the app belongs to one,
+/// so there is nothing to put on a page until the first sync brings one down -
+/// and for a brand-new account that is the pantry the server makes as it hands
+/// out the first sync token, moments away.
+///
+/// Anyone else who lands here has had their local data cleared, or been taken
+/// out of every pantry they were in; a fresh one is on its way either way, so
+/// the wait is the honest thing to show. "Try again" reconnects by hand for a
+/// wait that has gone on too long.
+let private waitingPage (failing: bool) dispatch =
+    Html.main
+        [ prop.className "flex min-h-screen flex-col px-4"
+          prop.children
+              [ Html.div
+                    [ prop.className "flex flex-1 flex-col items-center justify-center gap-8"
+                      prop.children
+                          [ Html.img
+                                [ prop.src "/brand/logo.svg"; prop.alt "Plaintext Pantry"; prop.className "w-48 max-w-full" ]
+                            Html.div
+                                [ prop.className "flex max-w-sm items-center gap-3"
+                                  prop.children
+                                      [ Html.span [ prop.className "spinner shrink-0"; prop.ariaHidden true ]
+                                        Html.p
+                                            [ prop.className "text-lg text-gray-600"
+                                              prop.role "status"
+                                              prop.text (
+                                                  if failing then
+                                                      "Please wait a few moments for your pantry to arrive. It needs the network, so this is waiting for that."
+                                                  else
+                                                      "Please wait a few moments for your pantry to arrive."
+                                              ) ] ] ]
+                            Html.div
+                                [ prop.className "flex items-center gap-4 text-sm text-gray-500"
+                                  prop.children
+                                      [ Html.button
+                                            [ prop.type' "button"
+                                              prop.className "hover:text-gray-900"
+                                              prop.text "Try again"
+                                              prop.onClick (fun _ -> dispatch Resync) ]
+                                        Html.span [ prop.ariaHidden true; prop.text "·" ]
+                                        Html.button
+                                            [ prop.type' "button"
+                                              prop.className "hover:text-gray-900"
+                                              prop.text "Sign out"
+                                              prop.onClick (fun _ -> dispatch SignOut) ] ] ] ] ]
                 legalFooter dispatch ] ]
 
 /// Terms and Privacy: readable signed out, so they sit outside the nav shell.
@@ -2560,6 +2631,9 @@ let View () =
     | _, Privacy -> privacyPage dispatch
     | SignedOut, _ -> loginPage dispatch
     | SignedIn _, Login -> Html.none
+    // Nothing the shell shows makes sense without a pantry: every page reads
+    // one pantry's rows, and the header has nothing to name.
+    | SignedIn _, _ when model.Pantry.IsNone -> waitingPage model.SyncFailing dispatch
     | SignedIn user, _ ->
         Html.div
             [ let choices = pantryChoices model

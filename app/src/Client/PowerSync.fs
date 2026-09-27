@@ -61,7 +61,10 @@ type BackendConnector =
     abstract uploadData: PowerSyncDatabase -> JS.Promise<unit>
 
 and [<Import("PowerSyncDatabase", "@powersync/web")>] PowerSyncDatabase(options: obj) =
-    member _.connect(connector: BackendConnector) : JS.Promise<unit> = jsNative
+    /// Opens the sync stream. Called again it aborts whatever stream is there
+    /// and starts a fresh one, which is how the app recovers a connection the
+    /// browser killed behind its back.
+    member _.connect(connector: BackendConnector, options: obj) : JS.Promise<unit> = jsNative
     /// Stops syncing and wipes the local database (sign-out).
     member _.disconnectAndClear() : JS.Promise<unit> = jsNative
     member _.execute(sql: string, parameters: obj[]) : JS.Promise<obj> = jsNative

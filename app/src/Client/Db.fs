@@ -275,7 +275,60 @@ let private connector =
 
             drain () }
 
-let connect () = db.connect connector
+/// How the app syncs. PowerSync's defaults suit a desktop tab left open all
+/// day; this is a phone in a kitchen.
+///
+/// `retryDelayMs` is the wait after a failed stream before trying again (5s by
+/// default) - a phone waking up wants the next attempt straight away.
+/// `crudUploadThrottleMs` is how long a local write sits before being pushed
+/// (1s by default); the round trip back down is what the other devices in the
+/// pantry are waiting on, so it is worth shortening.
+let private syncOptions =
+    createObj [ "retryDelayMs" ==> 1000; "crudUploadThrottleMs" ==> 200 ]
+
+let connect () = db.connect (connector, syncOptions)
+
+/// Tears the sync stream down and opens a fresh one - `connect` again, which
+/// aborts whatever is there first.
+///
+/// PowerSync retries a stream that *errors*, but not one that simply stops
+/// arriving - which is what a phone does to it. iOS freezes an installed app
+/// mid-stream, and on waking the connection is dead while the SDK still
+/// believes it is connected, so nothing written elsewhere (another device, the
+/// MCP tools) ever lands. Reconnecting is the only way to find out, so the app
+/// does it whenever it comes back to the foreground.
+let resync () = connect ()
+
+[<Emit("document.visibilityState === 'visible'")>]
+let private isVisible () : bool = jsNative
+
+/// Reconnects whenever the app is looked at again or the network comes back,
+/// so a change made elsewhere while it was away is there by the time the first
+/// screen is drawn - no tapping between pages to shake it loose.
+///
+/// `pageshow` is for Safari, which restores a page from its back/forward cache
+/// without firing `visibilitychange`. Coming back to the app tends to fire
+/// several of these at once (becoming visible is also regaining focus), and one
+/// reconnect is all they want between them, so a trigger within `quietMs` of
+/// the last reconnect is dropped. The clock starts now, since `connect` is
+/// happening alongside this. It only ever delays a *repeat*: the first trigger
+/// after a wait longer than that - which is every real wake-up - goes straight
+/// through.
+let keepSynced () =
+    let quietMs = 3000.0
+    let mutable last = JS.Constructors.Date.now ()
+
+    let reconnect () =
+        let now = JS.Constructors.Date.now ()
+
+        if isVisible () && now - last > quietMs then
+            last <- now
+            resync () |> Promise.catch (fun err -> JS.console.error ("resync", err)) |> ignore
+
+    Browser.Dom.document.addEventListener ("visibilitychange", fun _ -> reconnect ())
+    Browser.Dom.window.addEventListener ("pageshow", fun _ -> reconnect ())
+    Browser.Dom.window.addEventListener ("focus", fun _ -> reconnect ())
+    Browser.Dom.window.addEventListener ("online", fun _ -> reconnect ())
 
 let currentUser () = Api.getMe ()
 
@@ -358,9 +411,16 @@ let watchMenuRecipes (onChange: MenuRecipe list -> unit) =
             member _.onError(err) = JS.console.error ("watch menu recipes", err) }
     |> ignore
 
-let watchStatus (onChange: SyncStatus -> unit) =
-    onChange db.currentStatus
-    db.registerListener (createObj [ "statusChanged" ==> onChange ]) |> ignore
+/// Live sync health: true while downloads are failing, which is what having no
+/// network - or a server that isn't answering - looks like from in here.
+/// Connection errors count as download errors, so an app that cannot get a
+/// stream up at all reports true too. Called once straight away and then on
+/// every change.
+let watchSyncFailing (onChange: bool -> unit) =
+    let report (status: SyncStatus) = onChange status.downloadError.IsSome
+
+    report db.currentStatus
+    db.registerListener (createObj [ "statusChanged" ==> report ]) |> ignore
 
 /// The row a new recipe becomes. Built by the caller so the UI can show it
 /// before the insert lands.
