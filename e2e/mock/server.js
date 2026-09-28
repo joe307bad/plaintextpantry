@@ -174,6 +174,15 @@ const server = createServer(async (req, res) => {
         return json(res, 200, {});
       }
 
+      // Usage counters. Answered rather than falling through to the SPA so a
+      // screenshot run doesn't look like a page view to whoever reads them -
+      // this mock has no key to write with anyway.
+      case '/api/usage/pageview': {
+        await readBody(req);
+        res.writeHead(204).end();
+        return;
+      }
+
       case '/sync/stream': {
         if (DEBUG) log('stream request', await readBody(req));
         return streamSync(res);

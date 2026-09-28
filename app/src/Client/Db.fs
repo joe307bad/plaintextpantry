@@ -175,6 +175,20 @@ module private Api =
             | Error err -> return failwithf "Bad credentials response: %s" err
         }
 
+    /// One page visit, counted for the usage dashboard. Fire-and-forget and
+    /// silent: a counter is not worth a failed navigation, a retry or a line
+    /// in the console on a flaky connection, and the server holds the key
+    /// that the write actually needs (see Server/Usage.fs).
+    let countPageview (section: string) =
+        fetchUnsafe
+            Route.pageview
+            [ Method HttpMethod.POST
+              requestHeaders [ ContentType "text/plain" ]
+              Body(BodyInit.Case3 section) ]
+        |> Promise.map ignore
+        |> Promise.catch ignore
+        |> ignore
+
     let uploadCrud (ops: CrudOp list) =
         fetch
             Route.upload
@@ -345,6 +359,10 @@ let keepSynced () =
     Browser.Dom.window.addEventListener ("online", fun _ -> reconnect ())
 
 let currentUser () = Api.getMe ()
+
+/// One page visit, counted for the usage dashboard. Totals, not people: the
+/// section name is all that is sent, and the server is what writes the row.
+let countPageview (section: string) = Api.countPageview section
 
 /// Ends the session: wipes local data (another account may sign in on this
 /// browser next), then hands the browser to the server, which clears the

@@ -45,6 +45,7 @@ infra/keycloak     Realm provisioning and the login theme
 infra/terraform    AWS resources
 infra/deploy       Production compose stack and the script that applies it on the box
 e2e                Screenshot run: the real client against a mock backend, in Docker
+user-activity.sh   Who has signed in to production, and how often
 ```
 
 Everything belongs to a **pantry**: a household with an owner, a name and a
@@ -106,3 +107,51 @@ no SSH; for a shell on the box use
 `aws ssm start-session --target <instance id>`, then `cd /opt/plaintextpantry`
 and `docker compose logs -f server`. Secrets live in SSM Parameter Store
 under `/plaintextpantry/*`.
+
+## What gets used
+
+Two questions, two places, because they want different things: how much the
+app is being used, and who is using it.
+
+**How much** is a Grafana dashboard on the observability box this project
+shares with [fastbreak](https://github.com/joe307bad/fastbreak) and topspin —
+<https://fastbreak-o11y.fly.dev/grafana>, dashboard **Plaintext Pantry**. The
+server writes the counters behind it ([`Usage.fs`](app/src/Server/Usage.fs)):
+pages opened, sign-ins, recipes created, pantries shared, and the MCP calls
+that changed something. Totals only — no user id, no session, nothing that
+says which of them was whom — and no key in Parameter Store means no
+counting at all. The dashboard itself is defined by
+`o11y/grafana/plaintextpantry-dashboard.py` in the fastbreak repository; edit
+there and re-run it.
+
+**Who** is Keycloak's, since it is the only thing that sees a sign-in as a
+person. It keeps login events for 90 days (turned on by `provision.sh`), and
+this prints them, a column of addresses and a column of counts:
+
+```sh
+./user-activity.sh        # every sign-in there is a record of
+./user-activity.sh 7      # or just the last week
+```
+
+```
+      who      | logins | days
+---------------+--------+------
+ sam@gmail.com |      2 |   31
+ joe@gmail.com |      1 |    4
+```
+
+`logins` is sign-ins; `days` is days the app was opened, which is the one to
+read for someone who signed in once in March and has been cooking from it ever
+since — the app renews its session against Keycloak once a day, so a day of
+use leaves a mark without a login.
+
+[`user-activity.sh`](user-activity.sh) runs [`infra/deploy/user-activity.sh`](infra/deploy/user-activity.sh)
+on the box through SSM Run Command, which needs no SSH and no
+session-manager plugin. Away from a checkout, that is:
+
+```sh
+C=$(aws ssm send-command --targets Key=tag:Name,Values=plaintextpantry --document-name AWS-RunShellScript --parameters 'commands=["/opt/plaintextpantry/user-activity.sh"]' --query Command.CommandId --output text) && sleep 6 && aws ssm list-command-invocations --command-id "$C" --details --query 'CommandInvocations[0].CommandPlugins[0].Output' --output text
+```
+
+Both only know about sign-ins since events were switched on, so the record
+starts at the deploy that shipped them.

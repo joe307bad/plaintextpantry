@@ -31,6 +31,14 @@ type Config =
       /// in the user profile; prod bind-mounts a directory on the data
       /// volume so a redeploy doesn't sign everyone out. See Auth.configure.
       DataProtectionKeysDir: string option
+      /// The shared observability server (fastbreak-o11y) that usage counters
+      /// are written to, and the key that gets a write in. Either one empty -
+      /// local dev, CI - is the off switch: see Usage.fs.
+      O11yEndpoint: string
+      O11yApiKey: string
+      /// The tag every counter row carries, so a developer clicking around is
+      /// not counted as traffic. The dashboard filters on `prod`.
+      O11yEnv: string
       /// Local dev only (set by dev.sh): "user:password" of a Keycloak
       /// account that the login button signs in directly, so the /login page
       /// can be worked on without ever seeing Keycloak's. Never set in prod.
@@ -69,6 +77,9 @@ let load () =
         match env "DATA_PROTECTION_KEYS_DIR" "" with
         | "" -> None
         | dir -> Some dir
+      O11yEndpoint = (env "O11Y_ENDPOINT" "").TrimEnd '/'
+      O11yApiKey = env "O11Y_API_KEY" ""
+      O11yEnv = env "O11Y_ENV" "dev"
       DevAutoLogin =
         match (env "DEV_AUTO_LOGIN" "").Split(':', 2) with
         | [| user; password |] -> Some(user, password)

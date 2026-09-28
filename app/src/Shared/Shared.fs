@@ -244,6 +244,22 @@ module Codec =
     let encodeCrudOps (ops: CrudOp list) = Encode.list (List.map encodeCrudOp ops)
     let decodeCrudOps: Decoder<CrudOp list> = Decode.list decodeCrudOp
 
+/// The pages the usage dashboard counts visits to.
+///
+/// The browser is what knows a page was opened, but it is not what writes the
+/// count: the observability server's key would have to be in the bundle for
+/// that, and the key can write any table it likes. So the browser posts a
+/// section name here and the server writes the row - and because the names
+/// are this list and nothing else, the most a browser can cause is one more
+/// visit against one of eight pages. Totals only; nobody is identified.
+module Usage =
+    /// One per page. `recipe` covers every single recipe's page, since a chart
+    /// with a line per recipe would be a list of recipes, not of usage.
+    let sections =
+        [ "recipes"; "recipe"; "shopping-list"; "menu"; "settings"; "login"; "terms"; "privacy" ]
+
+    let isSection (name: string) = List.contains name sections
+
 /// HTTP routes served by the F# server.
 module Route =
     let syncCredentials = "/api/sync/credentials"
@@ -253,3 +269,6 @@ module Route =
     let logout = "/api/auth/logout"
     /// 200 + User when signed in, 401 otherwise.
     let me = "/api/auth/me"
+    /// One page visit, from the browser. No session needed: the login page is
+    /// a page too, and it is only ever seen by someone who has none.
+    let pageview = "/api/usage/pageview"

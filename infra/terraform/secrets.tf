@@ -63,3 +63,16 @@ resource "aws_ssm_parameter" "google" {
     ignore_changes = [value]
   }
 }
+
+# `/plaintextpantry/O11Y_API_KEY` - the write key for the observability box
+# shared with fastbreak, which the server sends usage counters with - is
+# deliberately NOT reserved here. It is the fastbreak app's key
+# (`fly secrets list -a fastbreak-o11y`), it is written straight in:
+#
+#   aws ssm put-parameter --overwrite --type SecureString \
+#     --name /plaintextpantry/O11Y_API_KEY --value '<key>'
+#
+# and a placeholder here would be a `value = "unset"` waiting to overwrite it
+# on the first apply after somebody set it. deploy.sh reads it if it is there
+# and counts nothing if it is not, which is the whole of what a reservation
+# would have bought.

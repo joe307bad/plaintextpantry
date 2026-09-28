@@ -18,7 +18,10 @@ let main args =
     Auth.configure builder.Services config
 
     builder.Services
-        .AddMcpServer(fun o -> o.ServerInfo <- Implementation(Name = "plaintextpantry", Version = "1.0.0"))
+        .AddMcpServer(fun o ->
+            o.ServerInfo <- Implementation(Name = "plaintextpantry", Version = "1.0.0")
+            // What the app is and how its recipes are written; see Mcp.bodyDoc.
+            o.ServerInstructions <- Mcp.instructions)
         .WithHttpTransport(fun o -> o.Stateless <- true)
         .WithTools<Mcp.PantryTools>()
     |> ignore

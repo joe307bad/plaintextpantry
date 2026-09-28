@@ -27,6 +27,43 @@ let private parseId (id: string) =
     | true, g -> g
     | _ -> raise (McpException $"'{id}' is not a valid id")
 
+/// The Cooklang this app parses, spelled out for whoever is writing a body.
+/// Both the `body` parameter and the server's instructions carry it: an
+/// assistant that has only ever seen recipes without metadata guesses at the
+/// top of the file - YAML front matter with no `---`, a Markdown heading, the
+/// old `>>` lines - and guesses the same way again next time.
+[<Literal>]
+let private cooklangDoc =
+    """Metadata, if there is any, comes first: `key: value` lines between two `---` lines, at the very top of the body and nowhere else.
+
+---
+servings: 4
+source: https://example.com
+---
+
+`>> key: value` lines still parse, but they are the old syntax and the app marks them as such; write the `---` block instead.
+
+Then the steps, one per line, with a blank line between them:
+
+  Simmer the @tomatoes{400%g} and @garlic in a #pan{} for ~{20%minutes}.
+
+@name is an ingredient, #name cookware, ~name a timer; {quantity%unit} follows the name. A name of more than one word needs the braces to say where it ends: @olive oil{2%tbsp}, or @spring onion{} with no quantity.
+
+`= Sauce` starts a section. `> ...` is a note to the cook. `--` comments out the rest of a line, `[- ... -]` comments inline."""
+
+/// The same, as the `body` parameter's own description.
+[<Literal>]
+let bodyDoc = "Cooklang source.\n\n" + cooklangDoc
+
+/// Handed to the client when it connects, so the dialect is known before the
+/// first recipe is written rather than after it comes back wrong.
+let instructions =
+    $"""Plaintext Pantry: one household's recipes, shopping list and weekly menu. Recipes are written in Cooklang, and the shopping list and menu are built out of them - an ingredient on the list knows which recipes still call for it.
+
+A recipe body looks like this:
+
+{cooklangDoc}"""
+
 /// What the tools return for a recipe. Camel-cased by the SDK's serializer.
 type Recipe =
     { Id: string
@@ -36,6 +73,14 @@ type Recipe =
       /// The names of the tags on it, as the badges beside it read.
       Tags: string list
       CreatedAt: DateTimeOffset }
+
+/// What a write gives back: the recipe as it is now stored, and whatever the
+/// Cooklang parser made of the body - a `>>` metadata line, an unclosed `{`,
+/// a timer with no duration. The body is saved either way (the app shows the
+/// same notes as squiggles in its own editor); they come back here because an
+/// assistant that has just written the metadata the old way has no other way
+/// of finding out, and would write it that way again next time.
+type SavedRecipe = { Recipe: Recipe; Notes: string list }
 
 /// A tag, with how many recipes carry it.
 type Tag =
@@ -137,6 +182,21 @@ let private sideGroups (sides: Db.MenuSideRow list) =
           Done = group |> List.forall (fun s -> s.Done)
           SideIds = group |> List.map (fun s -> string s.Id) })
 
+/// The parser's complaints about a body, each against the line it is on.
+let private cooklangNotes (body: string) =
+    let body = if isNull body then "" else body
+
+    [ for d in (Cooklang.parse body).Diagnostics do
+          let upTo = body.Substring(0, min d.Span.Start body.Length)
+          let line = 1 + (upTo |> Seq.filter ((=) '\n') |> Seq.length)
+
+          let severity =
+              match d.Severity with
+              | Cooklang.Severity.Error -> "error"
+              | Cooklang.Severity.Warning -> "warning"
+
+          $"line {line}, {severity}: {d.Message}" ]
+
 let private ingredientsOf (body: string) =
     Cooklang.ingredients (Cooklang.parse body).Recipe
 
@@ -167,9 +227,18 @@ type PantryTools(config: Config, http: IHttpContextAccessor) =
     let scopes = Auth.scopes ctx
     let cs = config.ConnectionString
 
-    let require scope =
+    /// The scope gate every tool passes through first - and, for a `:write`
+    /// scope, where a mutation is counted for the usage dashboard. Counting
+    /// here rather than in the tools means a tool that changes something
+    /// cannot be left out: the check is compulsory, and the scope already
+    /// names the area changed (`recipes:write` -> recipes), so there is no
+    /// second list of tools to keep in step with the first.
+    let require (scope: string) =
         if not (Set.contains scope scopes) then
             raise (noScope scope)
+
+        if scope.EndsWith ":write" then
+            Usage.mcp config (scope.Substring(0, scope.Length - ":write".Length))
 
     /// The pantry an assistant's writes go into: the caller's own. A device's
     /// first sync ordinarily makes it, so this is for the account that has
@@ -262,25 +331,28 @@ type PantryTools(config: Config, http: IHttpContextAccessor) =
         }
 
     [<McpServerTool(Name = "create_recipe");
-      Description("Create a recipe. The body is Cooklang: ingredients as @name{quantity%unit}, cookware as #name{}, timers as ~{10%minutes}, one step per paragraph. Multi-word names end with {}: @olive oil{2%tbsp}.")>]
+      Description("Create a recipe. Returns the recipe and `notes`: what the Cooklang parser made of the body, which is empty when the syntax is right.")>]
     member _.CreateRecipe
-        ([<Description("Recipe title")>] title: string, [<Description("Cooklang source")>] body: string)
-        : Task<Recipe> =
+        ([<Description("Recipe title")>] title: string, [<Description(bodyDoc)>] body: string)
+        : Task<SavedRecipe> =
         task {
             require "recipes:write"
             let! _ = ensurePantry ()
             let! id = Db.insertRecipe cs user.Id title body
             let! row = Db.getRecipe cs user.Id id
-            return recipe [] row.Value
+            return { Recipe = recipe [] row.Value; Notes = cooklangNotes row.Value.Body }
         }
 
-    [<McpServerTool(Name = "update_recipe"); Description("Change a recipe's title and/or body. Omit a field to leave it unchanged.")>]
+    [<McpServerTool(Name = "update_recipe");
+      Description("Change a recipe's title and/or body. Omit a field to leave it unchanged. Returns the recipe and `notes`, as create_recipe does.")>]
     member _.UpdateRecipe
         (
             [<Description("Recipe id")>] id: string,
             [<Description("New title; omit to keep"); Optional; DefaultParameterValue(null: string)>] title: string,
-            [<Description("New Cooklang body; omit to keep"); Optional; DefaultParameterValue(null: string)>] body: string
-        ) : Task<Recipe> =
+            [<Description("New body, same Cooklang as create_recipe; omit to keep");
+              Optional;
+              DefaultParameterValue(null: string)>] body: string
+        ) : Task<SavedRecipe> =
         task {
             require "recipes:write"
             let gid = parseId id
@@ -291,7 +363,7 @@ type PantryTools(config: Config, http: IHttpContextAccessor) =
 
             let! row = Db.getRecipe cs user.Id gid
             let! tags = Db.tagsOfRecipe cs user.Id gid
-            return recipe tags row.Value
+            return { Recipe = recipe tags row.Value; Notes = cooklangNotes row.Value.Body }
         }
 
     [<McpServerTool(Name = "delete_recipe"); Description("Delete a recipe permanently. Its tags come off it; the tags themselves stay.")>]

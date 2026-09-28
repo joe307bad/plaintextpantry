@@ -93,6 +93,15 @@ REALM_ARGS=(
   # session only spans a login here, so it stays at Keycloak's defaults.
   -s offlineSessionIdleTimeout=5184000
   -s offlineSessionMaxLifespanEnabled=false
+  # Login events, kept for 90 days. Off by default in Keycloak, and with them
+  # off nothing anywhere records who signed in or when - the usage dashboard
+  # counts sign-ins but deliberately not whose. This is the row behind
+  # `infra/deploy/user-activity.sh`. REFRESH_TOKEN is in the list because the app
+  # spends its offline token once a day (Server/Auth.fs), which makes those
+  # rows a record of days the app was actually opened, not just of logins.
+  -s eventsEnabled=true
+  -s eventsExpiration=7776000
+  -s 'enabledEventTypes=["LOGIN","LOGIN_ERROR","LOGOUT","REFRESH_TOKEN"]'
 )
 if kc get "realms/$REALM" >/dev/null 2>&1; then
   kc update "realms/$REALM" "${REALM_ARGS[@]}"

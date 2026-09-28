@@ -239,6 +239,12 @@ let configure (services: IServiceCollection) (config: Config) =
                         (Option.ofObj ctx.TokenEndpointResponse.RefreshToken)
 
                     ctx.Properties.SetString(renewAtKey, renewAt renewEvery)
+                    // A session beginning, and the only place one does: the
+                    // daily refresh above re-issues the cookie without coming
+                    // through here, so a renewal is not counted as a sign-in.
+                    // "google" because that is the only way through Keycloak's
+                    // browser flow (see OnRedirectToIdentityProvider below).
+                    Usage.login config "google"
                     Task.CompletedTask
 
             // Skip Keycloak's own login page: go straight to the Google
@@ -384,6 +390,7 @@ let private devAutoLogin (config: Config) (user: string) (password: string) (ctx
 
         do! ctx.SignInAsync(cookieScheme, ClaimsPrincipal identity, props)
         ctx.User <- ClaimsPrincipal identity
+        Usage.login config "dev"
     }
 
 /// The signed-in user, or 401.

@@ -25,6 +25,7 @@ stream, and `mock/server.js` is the whole backend:
 | `GET /api/sync/credentials` | a JWT-shaped token and this same origin as the sync endpoint |
 | `POST /sync/stream` | one checkpoint containing every fixture row, then held open |
 | `POST /api/sync/upload` | accepts local writes and drops them |
+| `POST /api/usage/pageview` | 204; a screenshot run is not usage |
 | everything else | the built client, with the SPA fallback Caddy does in production |
 
 The rows come from `mock/fixtures.js` — a household called Maple Street, two
