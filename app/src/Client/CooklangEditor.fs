@@ -186,4 +186,6 @@ let CooklangEditor (value: string, known: KnownNames, placeholderText: string, o
         [| box value |]
     )
 
-    Html.div [ prop.ref container; prop.className "rounded border border-gray-300 text-sm" ]
+    // The border the fields beside it wear; the text inside is the page's
+    // own size, as theirs is. index.css does the rest of the impression.
+    Html.div [ prop.ref container; prop.className "rounded border border-gray-300" ]

@@ -26,6 +26,12 @@ KEYCLOAK_CLIENT_SECRET=$(ssm KEYCLOAK_CLIENT_SECRET)
 # seeds these as "unset", which provision.sh treats as absent.
 AUTH_GOOGLE_ID=$(ssm AUTH_GOOGLE_ID); [ "$AUTH_GOOGLE_ID" = unset ] && AUTH_GOOGLE_ID=""
 AUTH_GOOGLE_SECRET=$(ssm AUTH_GOOGLE_SECRET); [ "$AUTH_GOOGLE_SECRET" = unset ] && AUTH_GOOGLE_SECRET=""
+# Write key for the shared observability box, written straight into Parameter
+# Store rather than reserved by Terraform (see secrets.tf), so here it may not
+# exist at all. Missing or "unset": the server writes no usage counters and
+# says nothing about it.
+O11Y_API_KEY=$(ssm O11Y_API_KEY 2>/dev/null || echo unset)
+[ "$O11Y_API_KEY" = unset ] && O11Y_API_KEY=""
 
 # Bind-mounted config isn't part of compose's change detection; hashing it
 # into an env var is (see docker-compose.yml).
@@ -46,6 +52,7 @@ POWERSYNC_JWT_SECRET=$POWERSYNC_JWT_SECRET
 POWERSYNC_JWT_SECRET_B64=$POWERSYNC_JWT_SECRET_B64
 KEYCLOAK_ADMIN_PASSWORD=$KEYCLOAK_ADMIN_PASSWORD
 KEYCLOAK_CLIENT_SECRET=$KEYCLOAK_CLIENT_SECRET
+O11Y_API_KEY=$O11Y_API_KEY
 CADDY_CONFIG_HASH=$CADDY_CONFIG_HASH
 POWERSYNC_CONFIG_HASH=$POWERSYNC_CONFIG_HASH
 KEYCLOAK_CONFIG_HASH=$KEYCLOAK_CONFIG_HASH

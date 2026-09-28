@@ -298,6 +298,27 @@ let private parseUrl (segments: string list) =
     | [ "privacy" ] -> Privacy
     | _ -> NotFound
 
+/// What the usage counters know each page as - the same eight names as
+/// `Shared.Usage.sections`, which is what the server will accept. Every
+/// recipe is `recipe`: a line per recipe would be a chart of the library, not
+/// of how much the app is used. `NotFound` is nobody opening anything.
+let private sectionOf page =
+    match page with
+    | RecipeList -> Some "recipes"
+    | RecipeDetail _ -> Some "recipe"
+    | ShoppingList -> Some "shopping-list"
+    | Menu -> Some "menu"
+    | Settings -> Some "settings"
+    | Login -> Some "login"
+    | Terms -> Some "terms"
+    | Privacy -> Some "privacy"
+    | NotFound -> None
+
+let private countPage page =
+    match sectionOf page with
+    | Some section -> Cmd.ofEffect (fun _ -> Db.countPageview section)
+    | None -> Cmd.none
+
 let private after (ms: int) (msg: Msg) =
     Cmd.ofEffect (fun dispatch -> window.setTimeout ((fun () -> dispatch msg), ms) |> ignore)
 
@@ -681,7 +702,7 @@ let private addToShoppingListWithToast (recipe: Recipe) (model: Model) =
         let model, showToast = toast $"\"{recipe.title}\" added to {(List.head model.ShoppingLists).name}" model
         model, Cmd.batch [ cmd; showToast ]
 
-let update msg model =
+let private updateModel msg model =
     match msg with
     | SessionChecked(Some user) ->
         // A signed-in user has no business on /login.
@@ -699,7 +720,9 @@ let update msg model =
 
         let page = if isPublic model.Page then model.Page else Login
         { model with Session = SignedOut; Page = page; ReturnTo = returnTo }, Cmd.none
-    | SignIn -> model, Cmd.ofEffect (fun _ -> Db.signIn (Router.format model.ReturnTo))
+    // Off the login page before the browser leaves for Keycloak: what is on
+    // screen at that moment is what stays there until the app loads again.
+    | SignIn -> { model with Session = Checking }, Cmd.ofEffect (fun _ -> Db.signIn (Router.format model.ReturnTo))
     | SignOut -> model, fireAndForget (Db.signOut ())
     | UrlChanged segments ->
         let page = parseUrl segments
@@ -1152,6 +1175,24 @@ let update msg model =
         | _ -> model, Cmd.none
     | Ignore -> model, Cmd.none
 
+/// Every page the app shows is counted once, here, rather than at each place
+/// that sets `Page`. A link, the back button, and the redirect that follows
+/// working out who is signed in all end the same way - the page is not the
+/// one it was - and this is the only place that sees all three.
+///
+/// The page the app opened on is counted when the session settles rather than
+/// at start-up, because until then it is not known which page that is: a
+/// visitor with no session is on their way to /login, and counting the
+/// recipe list they were pointed at would be counting a page nobody saw.
+let update msg model =
+    let updated, cmd = updateModel msg model
+    let opened = model.Session = Checking && updated.Session <> Checking
+
+    if updated.Page = model.Page && not opened then
+        updated, cmd
+    else
+        updated, Cmd.batch [ cmd; countPage updated.Page ]
+
 /// Props for an anchor that navigates in-app (real href, so open-in-new-tab still works).
 let private linkProps (className: string) dispatch (segments: string list) =
     [ prop.href (Router.format segments)
@@ -1244,7 +1285,11 @@ let private settingsCog (className: string) (isActive: bool) dispatch =
         @ [ prop.ariaLabel "Pantry settings"; prop.title "Pantry settings"; prop.children [ cogIcon ] ]
     )
 
-/// Desktop: the bar across the top. Hidden on phones, where `mobileMenu` takes over.
+/// Desktop: the bar across the top. It carries the pantry's name and the
+/// signed-in address, so it needs room; under `lg` (1024px) it was folding
+/// "Shopping list" and "Sign out" onto second lines, and the phone layout -
+/// `mobileMenu` - is the better answer at that width. That breakpoint is where
+/// the whole layout turns over, here and everywhere else `lg:` appears.
 let private navBar (page: Page) (user: Shared.User) (choices: PantryChoice list) (pantry: string option) dispatch =
     // `nav-link` (index.css) reserves the bold width from a hidden copy of the
     // text in `data-text`, so the active link going bold shifts nothing.
@@ -1258,7 +1303,7 @@ let private navBar (page: Page) (user: Shared.User) (choices: PantryChoice list)
         )
 
     Html.nav
-        [ prop.className "hidden items-center gap-6 border-b border-gray-200 px-4 py-3 md:flex"
+        [ prop.className "hidden items-center gap-6 border-b border-gray-200 px-4 py-3 lg:flex"
           prop.children
               [ // Just the door, no wordmark, at the top left.
                 Html.a
@@ -1282,9 +1327,9 @@ let private navBar (page: Page) (user: Shared.User) (choices: PantryChoice list)
                       prop.text "Sign out"
                       prop.onClick (fun _ -> dispatch SignOut) ] ] ]
 
-/// Phones: no top bar. The logo sits bottom-right (the one round button in the
-/// app) and toggles a bottom sheet holding the same links. Navigating closes
-/// it (see UrlChanged).
+/// Phones, and any window under `lg`: no top bar. The logo sits bottom-right
+/// (the one round button in the app) and toggles a bottom sheet holding the
+/// same links. Navigating closes it (see UrlChanged).
 let private mobileMenu (page: Page) (user: Shared.User) (choices: PantryChoice list) (pantry: string option) (isOpen: bool) dispatch =
     let navLink segments text isActive =
         linkWith
@@ -1294,7 +1339,7 @@ let private mobileMenu (page: Page) (user: Shared.User) (choices: PantryChoice l
             text
 
     Html.div
-        [ prop.className "md:hidden"
+        [ prop.className "lg:hidden"
           prop.children
               [ if isOpen then
                     Html.div
@@ -1383,24 +1428,45 @@ let private googleIcon =
                                   svg.d
                                       "M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" ] ] ] ] ]
 
-let private loginPage dispatch =
+/// The logo on an otherwise empty screen, with the legal footer under it:
+/// the shape of every screen the app has before it has any of the user's own
+/// to show. The login page, the sign-in round trip and the wait for a first
+/// sync are this with different middles, so one becomes the next without the
+/// page rearranging itself.
+let private splashPage (middle: ReactElement list) dispatch =
     Html.main
         [ prop.className "flex min-h-screen flex-col px-4"
           prop.children
               [ Html.div
                     [ prop.className "flex flex-1 flex-col items-center justify-center gap-8"
-                      prop.children
-                          [ Html.img
-                                [ prop.src "/brand/logo.svg"; prop.alt "Plaintext Pantry"; prop.className "w-48 max-w-full" ]
-                            Html.p
-                                [ prop.className "max-w-sm text-center text-lg text-gray-600"
-                                  prop.text "Local-first, open source, free, minimalist recipe and grocery list manager" ]
-                            Html.button
-                                [ prop.className
-                                      "inline-flex items-center gap-2.5 bg-brand px-4 py-2.5 text-sm font-semibold leading-none text-white hover:shadow-md hover:shadow-brand/30"
-                                  prop.onClick (fun _ -> dispatch SignIn)
-                                  prop.children [ googleIcon; Html.span [ prop.className "pt-px"; prop.text "Login with Google" ] ] ] ] ]
+                      prop.children (
+                          Html.img
+                              [ prop.src "/brand/logo.svg"; prop.alt "Plaintext Pantry"; prop.className "w-48 max-w-full" ]
+                          :: middle
+                      ) ]
                 legalFooter dispatch ] ]
+
+/// Shown while the app works out who is signed in - and, crucially, from the
+/// tap on "Login with Google" until the browser leaves for Keycloak. A
+/// browser keeps the old page on screen until the new one paints, so the
+/// whole trip out to Google and back is spent looking at whatever the login
+/// page last showed; make that this, and the login form is never on screen
+/// again after the button is pressed. The far end of the trip opens on the
+/// same screen, so the two join up.
+let private loadingPage dispatch =
+    splashPage [ Html.span [ prop.className "spinner"; prop.role "status"; prop.ariaLabel "Loading" ] ] dispatch
+
+let private loginPage dispatch =
+    splashPage
+        [ Html.p
+              [ prop.className "max-w-sm text-center text-lg text-gray-600"
+                prop.text "Local-first, open source, free, minimalist recipe and grocery list manager" ]
+          Html.button
+              [ prop.className
+                    "inline-flex items-center gap-2.5 bg-brand px-4 py-2.5 text-sm font-semibold leading-none text-white hover:shadow-md hover:shadow-brand/30"
+                prop.onClick (fun _ -> dispatch SignIn)
+                prop.children [ googleIcon; Html.span [ prop.className "pt-px"; prop.text "Login with Google" ] ] ] ]
+        dispatch
 
 /// Signed in with no pantry to show yet. Everything in the app belongs to one,
 /// so there is nothing to put on a page until the first sync brings one down -
@@ -1412,42 +1478,35 @@ let private loginPage dispatch =
 /// the wait is the honest thing to show. "Try again" reconnects by hand for a
 /// wait that has gone on too long.
 let private waitingPage (failing: bool) dispatch =
-    Html.main
-        [ prop.className "flex min-h-screen flex-col px-4"
-          prop.children
-              [ Html.div
-                    [ prop.className "flex flex-1 flex-col items-center justify-center gap-8"
-                      prop.children
-                          [ Html.img
-                                [ prop.src "/brand/logo.svg"; prop.alt "Plaintext Pantry"; prop.className "w-48 max-w-full" ]
-                            Html.div
-                                [ prop.className "flex max-w-sm items-center gap-3"
-                                  prop.children
-                                      [ Html.span [ prop.className "spinner shrink-0"; prop.ariaHidden true ]
-                                        Html.p
-                                            [ prop.className "text-lg text-gray-600"
-                                              prop.role "status"
-                                              prop.text (
-                                                  if failing then
-                                                      "Please wait a few moments for your pantry to arrive. It needs the network, so this is waiting for that."
-                                                  else
-                                                      "Please wait a few moments for your pantry to arrive."
-                                              ) ] ] ]
-                            Html.div
-                                [ prop.className "flex items-center gap-4 text-sm text-gray-500"
-                                  prop.children
-                                      [ Html.button
-                                            [ prop.type' "button"
-                                              prop.className "hover:text-gray-900"
-                                              prop.text "Try again"
-                                              prop.onClick (fun _ -> dispatch Resync) ]
-                                        Html.span [ prop.ariaHidden true; prop.text "·" ]
-                                        Html.button
-                                            [ prop.type' "button"
-                                              prop.className "hover:text-gray-900"
-                                              prop.text "Sign out"
-                                              prop.onClick (fun _ -> dispatch SignOut) ] ] ] ] ]
-                legalFooter dispatch ] ]
+    splashPage
+        [ Html.div
+              [ prop.className "flex max-w-sm items-center gap-3"
+                prop.children
+                    [ Html.span [ prop.className "spinner shrink-0"; prop.ariaHidden true ]
+                      Html.p
+                          [ prop.className "text-lg text-gray-600"
+                            prop.role "status"
+                            prop.text (
+                                if failing then
+                                    "Please wait a few moments for your pantry to arrive. It needs the network, so this is waiting for that."
+                                else
+                                    "Please wait a few moments for your pantry to arrive."
+                            ) ] ] ]
+          Html.div
+              [ prop.className "flex items-center gap-4 text-sm text-gray-500"
+                prop.children
+                    [ Html.button
+                          [ prop.type' "button"
+                            prop.className "hover:text-gray-900"
+                            prop.text "Try again"
+                            prop.onClick (fun _ -> dispatch Resync) ]
+                      Html.span [ prop.ariaHidden true; prop.text "·" ]
+                      Html.button
+                          [ prop.type' "button"
+                            prop.className "hover:text-gray-900"
+                            prop.text "Sign out"
+                            prop.onClick (fun _ -> dispatch SignOut) ] ] ] ]
+        dispatch
 
 /// Terms and Privacy: readable signed out, so they sit outside the nav shell.
 let private legalPage (title: string) (paragraphs: ReactElement list) dispatch =
@@ -1618,7 +1677,7 @@ let private noteSpan (className: string) (note: string) =
     if note = "" then
         Html.none
     else
-        Html.span [ prop.className ("min-w-0 truncate pl-3 md:pl-0 " + className); prop.text note ]
+        Html.span [ prop.className ("min-w-0 truncate pl-3 lg:pl-0 " + className); prop.text note ]
 
 /// A recipe's tags, after its title: small grey rectangles, the same sharp
 /// corners as everything else on the page.
@@ -1657,7 +1716,7 @@ let private tagFilterBar (tags: Tag list) (selected: string option) dispatch =
 
         Html.div
             [ prop.className
-                  "no-scrollbar flex min-w-0 flex-1 items-center gap-2 overflow-x-auto md:mb-3 md:flex-wrap md:overflow-visible"
+                  "no-scrollbar flex min-w-0 flex-1 items-center gap-2 overflow-x-auto lg:mb-3 lg:flex-wrap lg:overflow-visible"
               prop.children
                   [ chip "All" selected.IsNone (FilterByTag None)
                     for tag in Shared.Tag.sorted (fun (t: Tag) -> t.name) tags do
@@ -1670,12 +1729,12 @@ let private listPage (model: Model) (known: CooklangEditor.KnownNames) dispatch 
           // so the tags stay in reach however far down the list you have got. At
           // md the two stack again, as a bar of their own above the recipes.
           Html.div
-              [ prop.className "pinned-bar mb-3 flex items-center gap-2 md:mb-0 md:block"
+              [ prop.className "pinned-bar mb-3 flex items-center gap-2 lg:mb-0 lg:block"
                 prop.children
                     [ Html.button
                           [ prop.type' "button"
                             prop.className
-                                "shrink-0 bg-brand px-3 py-1 font-semibold text-white hover:shadow-md hover:shadow-brand/30 md:mb-3"
+                                "shrink-0 bg-brand px-3 py-1 font-semibold text-white hover:shadow-md hover:shadow-brand/30 lg:mb-3"
                             prop.text "New Recipe"
                             prop.onClick (fun _ -> dispatch OpenNewRecipe) ]
                       tagFilterBar model.Tags (activeTag model) dispatch ] ]
@@ -1691,7 +1750,7 @@ let private listPage (model: Model) (known: CooklangEditor.KnownNames) dispatch 
                                   [ prop.key r.id
                                     // Wraps at md, so a recipe with a few tags on
                                     // it takes a second line instead of overflowing.
-                                    prop.className "flex items-start gap-2 md:flex-wrap md:items-center"
+                                    prop.className "flex items-start gap-2 lg:flex-wrap lg:items-center"
                                     prop.children
                                         [ // Same box as the number on the menu page, so the
                                           // + here and the × there share a column.
@@ -1714,7 +1773,7 @@ let private listPage (model: Model) (known: CooklangEditor.KnownNames) dispatch 
                                           // where each badge wraps on its own as it did
                                           // before.
                                           Html.div
-                                              [ prop.className "flex min-w-0 flex-1 flex-col items-start gap-1 md:contents"
+                                              [ prop.className "flex min-w-0 flex-1 flex-col items-start gap-1 lg:contents"
                                                 prop.children
                                                     [ linkWith
                                                           "text-blue-600 underline hover:text-blue-800"
@@ -1726,7 +1785,7 @@ let private listPage (model: Model) (known: CooklangEditor.KnownNames) dispatch 
                                                       | [] -> Html.none
                                                       | tags ->
                                                           Html.div
-                                                              [ prop.className "flex flex-wrap gap-2 pl-3 md:contents"
+                                                              [ prop.className "flex flex-wrap gap-2 pl-3 lg:contents"
                                                                 prop.children (tagBadges tags) ] ] ] ] ] ] ]
           match model.NewRecipe with
           | Some recipe -> newRecipeModal recipe known dispatch
@@ -2010,7 +2069,7 @@ let private detailPage (model: Model) (id: string) (known: CooklangEditor.KnownN
         // the editor taking every remaining pixel (CodeMirror scrolls inside
         // it), and the actions. Desktop: the same rows in normal flow.
         Html.form
-            [ prop.className "fixed inset-0 flex flex-col gap-3 p-4 pt-safe-4 pb-safe-4 md:static md:max-w-2xl md:p-0"
+            [ prop.className "fixed inset-0 flex flex-col gap-3 p-4 pt-safe-4 pb-safe-4 lg:static lg:max-w-2xl lg:p-0"
               prop.onSubmit (fun e ->
                   e.preventDefault ()
                   dispatch (SaveRecipe id))
@@ -2038,8 +2097,8 @@ let private detailPage (model: Model) (id: string) (known: CooklangEditor.KnownN
                                       prop.onClick (fun _ -> dispatch (AddToShoppingList id))
                                       // Shorter on phones so the row stays on one line.
                                       prop.children
-                                          [ Html.span [ prop.className "md:hidden"; prop.text "Add to list" ]
-                                            Html.span [ prop.className "hidden md:inline"; prop.text "Add to shopping list" ] ] ]
+                                          [ Html.span [ prop.className "lg:hidden"; prop.text "Add to list" ]
+                                            Html.span [ prop.className "hidden lg:inline"; prop.text "Add to shopping list" ] ] ]
                                 Html.button
                                     [ prop.type' "button"
                                       prop.className "ml-auto border border-red-300 px-3 py-1 text-red-600 hover:bg-red-50"
@@ -2172,7 +2231,7 @@ let private itemRow (id: string) (text: string) (note: string) (isDone: bool) (e
                                 // note doesn't push the item itself into wrapping.
                                 // Desktop has room for one line.
                                 Html.div
-                                    [ prop.className "flex min-w-0 flex-1 flex-col md:flex-row md:items-center md:gap-2"
+                                    [ prop.className "flex min-w-0 flex-1 flex-col lg:flex-row lg:items-center lg:gap-2"
                                       prop.children
                                           [ Html.span
                                                 [ prop.className (if isDone then "text-gray-400 line-through" else "")
@@ -2229,7 +2288,7 @@ let private shoppingListPage (model: Model) dispatch =
                     prop.text (createdAge list.created_at) ]
               Html.div
                   [ // Phones: name left, button at the right edge. Desktop: both on the left.
-                    prop.className "mb-3 flex items-center justify-between gap-3 md:justify-start"
+                    prop.className "mb-3 flex items-center justify-between gap-3 lg:justify-start"
                     prop.children
                         [ Html.h2 [ prop.className "min-w-0 truncate text-lg font-semibold"; prop.title list.name; prop.text list.name ]
                           Html.button
@@ -2306,7 +2365,7 @@ let private newSideRow (entryId: string) (text: string) dispatch =
 let private sidesTree (entryId: string) (sides: MenuSide list) (draft: string) dispatch =
     Html.ul
         [ // Indented past the number and × so the line starts under the title.
-          prop.className "ml-6 flex flex-col border-l border-gray-200 pl-3 md:ml-10"
+          prop.className "ml-6 flex flex-col border-l border-gray-200 pl-3 lg:ml-10"
           prop.children
               [ for side in sides do
                     Html.li
@@ -2352,7 +2411,7 @@ let private menuPage (model: Model) dispatch =
               // lists start on the same line. Phones: name left, button at the
               // right edge. Desktop: both on the left.
               Html.div
-                  [ prop.className "mb-3 flex h-8 items-center justify-between gap-3 md:justify-start"
+                  [ prop.className "mb-3 flex h-8 items-center justify-between gap-3 lg:justify-start"
                     prop.children
                         [ // One line, cut with an ellipsis: the name has two random
                           // words on the end and the buttons keep their room.
@@ -2386,7 +2445,7 @@ let private menuPage (model: Model) dispatch =
                                   [ prop.key e.id
                                     prop.children
                                         [ Html.div
-                                              [ prop.className "flex items-start gap-2 md:items-center"
+                                              [ prop.className "flex items-start gap-2 lg:items-center"
                                                 prop.children
                                                     [ // Same left edge and padding as the × on the
                                                       // recipe list, so the two pages line up.
@@ -2407,7 +2466,7 @@ let private menuPage (model: Model) dispatch =
                                                       // back on it at md.
                                                       Html.div
                                                           [ prop.className
-                                                                "flex min-w-0 flex-1 flex-col items-start md:contents"
+                                                                "flex min-w-0 flex-1 flex-col items-start lg:contents"
                                                             prop.children
                                                                 [ linkWith
                                                                       "text-blue-600 underline hover:text-blue-800"
@@ -2676,11 +2735,12 @@ let View () =
         )
 
     match model.Session, model.Page with
-    | Checking, _ -> Html.none
+    // The legal pages need no session, so they never wait on one.
     | _, Terms -> termsPage dispatch
     | _, Privacy -> privacyPage dispatch
+    | Checking, _ -> loadingPage dispatch
     | SignedOut, _ -> loginPage dispatch
-    | SignedIn _, Login -> Html.none
+    | SignedIn _, Login -> loadingPage dispatch
     // Nothing the shell shows makes sense without a pantry: every page reads
     // one pantry's rows, and the header has nothing to name.
     | SignedIn _, _ when model.Pantry.IsNone -> waitingPage model.SyncFailing dispatch
@@ -2693,7 +2753,7 @@ let View () =
               Html.main
                   [ // Enough bottom padding that the last row scrolls clear of the
                     // fixed "Created" pill and menu button.
-                    prop.className "px-4 pt-safe-3 pb-safe-24 md:py-3"
+                    prop.className "px-4 pt-safe-3 pb-safe-24 lg:py-3"
                     prop.children
                         [ match model.Page with
                           | RecipeList -> listPage model known dispatch
@@ -2738,7 +2798,7 @@ let View () =
               // "Created"): the update bar, if any, over the passing toast.
               Html.div
                   [ prop.className
-                        "pointer-events-none fixed bottom-safe-16 left-1/2 z-50 flex -translate-x-1/2 flex-col items-center gap-2 md:bottom-6"
+                        "pointer-events-none fixed bottom-safe-16 left-1/2 z-50 flex -translate-x-1/2 flex-col items-center gap-2 lg:bottom-6"
                     prop.children
                         [ match model.Update with
                           | Some reload ->

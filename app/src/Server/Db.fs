@@ -286,11 +286,16 @@ let private buildCommand (conn: NpgsqlConnection) (tx: NpgsqlTransaction) (userI
 /// Applies a whole upload transaction atomically, so a failure leaves the
 /// client's queue intact to retry. Each op is vouched for by `decide` first,
 /// in the same transaction it would be applied in.
-let applyCrud (connectionString: string) (userId: string) (ops: CrudOp list) : Task =
+/// Applies what the caller is allowed to apply and returns exactly that: the
+/// ops that reached the database. The usage counters are drawn from the
+/// return value rather than from the request, so a write someone was not
+/// allowed to make is not counted as one that happened.
+let applyCrud (connectionString: string) (userId: string) (ops: CrudOp list) : Task<CrudOp list> =
     task {
         use conn = new NpgsqlConnection(connectionString)
         do! conn.OpenAsync()
         use! tx = conn.BeginTransactionAsync()
+        let applied = ResizeArray<CrudOp>()
 
         for op in ops do
             // The table name goes into SQL by name - `decide` looks the row's
@@ -304,9 +309,10 @@ let applyCrud (connectionString: string) (userId: string) (ops: CrudOp list) : T
             | Apply ->
                 use cmd = buildCommand conn tx userId op
                 let! _ = cmd.ExecuteNonQueryAsync()
-                ()
+                applied.Add op
 
         do! tx.CommitAsync()
+        return List.ofSeq applied
     }
 
 // ---------------------------------------------------------------------------

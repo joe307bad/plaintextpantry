@@ -106,8 +106,8 @@
      the tags stay in reach the whole way down. `main` has already padded the
      page down past the status bar; this cancels that padding and lays it out
      again inside itself, so when the bar pins to top: 0 its own white padding
-     covers the strip the rows would otherwise show through. Phones only - on a
-     desktop there is a nav bar up there and the page is short. */
+     covers the strip the rows would otherwise show through. The phone layout
+     only - from `lg` up there is a nav bar up there and the page is short. */
   .pinned-bar {
     position: sticky;
     top: 0;
@@ -119,7 +119,7 @@
     padding-bottom: --spacing(2);
     background-color: white;
   }
-  @media (width >= 48rem) {
+  @media (width >= 64rem) {
     .pinned-bar {
       position: static;
       margin: 0;
@@ -178,10 +178,35 @@
 /* `forwards` holds the faded-out state until the element is removed. */
 .toast-out { animation: toast-out 150ms ease-in forwards; }
 
-/* Cooklang editor (CodeMirror). Token classes come from CooklangEditor.fs. */
-.cm-editor { min-height: 12rem; padding: 0.25rem 0.5rem; }
-.cm-editor.cm-focused { outline: none; }
-.cm-scroller { font-family: var(--font-mono); line-height: 1.5; }
+/* Cooklang editor (CodeMirror). Token classes come from CooklangEditor.fs.
+   It stands in for a textarea, so it takes the padding, text size and focus
+   ring of the inputs beside it, and only the highlighting sets it apart. `.cm-editor` leads every selector because CodeMirror scopes its own
+   theme with the class it puts on the editor (`.ͼ1 .cm-scroller`): a bare
+   `.cm-scroller` rule here is the lighter of the two and silently loses,
+   which is how this text spent a while in the browser's default monospace.
+   Same weight and later in the sheet, so these win. */
+.cm-editor { min-height: 12rem; }
+.cm-editor .cm-scroller { font-family: var(--font-mono); }
+/* Padding on the content, not the editor: the text then scrolls under it the
+   way a textarea's does, and it lines up with the `px-2 py-1` fields above. */
+.cm-editor .cm-content { padding: 0.25rem 0.5rem; line-height: 1.5; }
+/* CodeMirror indents every line by 6px to leave room for the caret at the
+   start; a textarea doesn't, and neither do the inputs this sits with. */
+.cm-editor .cm-line { padding: 0; }
+/* Tailwind's preflight colour for `::placeholder`, so the "Recipe" hint and
+   the "Title" hint above it are the same grey. */
+.cm-editor .cm-placeholder { color: color-mix(in oklab, currentColor 50%, transparent); }
+/* The hint goes as soon as the field is clicked into. CodeMirror puts it in
+   the first line as a widget, ahead of the 1em-tall spacer image every widget
+   gets - and an empty line's caret takes its height from whatever is in the
+   line, so with those two there it is 16px against the text's own 19px, and
+   sits high. Taking both out of the line on focus is what leaves a caret the
+   size a textarea's would be, and no hint under it. */
+.cm-editor.cm-focused .cm-placeholder,
+.cm-editor.cm-focused .cm-line:has(.cm-placeholder) .cm-widgetBuffer { display: none; }
+/* The focus ring an <input> gets for free. The 1px offset puts it on the
+   wrapper's border, where the browser draws its own. */
+.cm-editor.cm-focused { outline: 2px solid Highlight; outline: 2px auto -webkit-focus-ring-color; outline-offset: 1px; }
 .ck-ingredient { color: var(--color-emerald-700); font-weight: 600; }
 .ck-cookware { color: var(--color-amber-700); font-weight: 600; }
 .ck-timer { color: var(--color-sky-700); font-weight: 600; }
