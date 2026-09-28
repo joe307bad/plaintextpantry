@@ -561,6 +561,27 @@ let private currentMembers (model: Model) =
         |> List.filter (fun m -> m.pantry_id = pantry.id)
         |> List.sortBy (fun m -> (m.user_id <> pantry.user_id), m.created_at, m.id)
 
+/// Who made a row, named the way the settings page names them - so a member
+/// whose own client has synced their name reads as "Joe", and one whose
+/// hasn't as their email or the short form of their id.
+///
+/// `None` when there is nobody to name: a row from before rows remembered
+/// who made them (`user_id` is ''), or one made by someone who has since
+/// been put out of the pantry, whose member row went with them.
+let private whoAdded (model: Model) (rowUserId: string) =
+    if rowUserId = "" then
+        None
+    else
+        model.Members
+        |> List.tryFind (fun m -> m.user_id = rowUserId && Some m.pantry_id = model.Pantry)
+        |> Option.map (fun m -> Shared.Pantry.memberName m.name m.email m.user_id)
+
+/// That name as the note beside a row: "(Added by Joe)", and nothing at all
+/// when there is nobody to name. The shopping list and the menu each build
+/// their own, folding what else they have to say into the same parenthesis.
+let private addedByNote (model: Model) (rowUserId: string) =
+    Shared.Note.text [ Shared.Note.addedBy (whoAdded model rowUserId) ]
+
 let private findRecipe id (recipes: Recipe list) =
     recipes |> List.tryFind (fun r -> r.id = id)
 
@@ -643,7 +664,7 @@ let private ingredientsOf (recipe: Recipe) =
 /// after. The recipe is in the current pantry, so the list is too.
 let private addToShoppingList (recipe: Recipe) (model: Model) =
     let lists, items, plan =
-        Db.planShoppingAdd recipe.pantry_id model.ShoppingLists model.ShoppingItems (ingredientsOf recipe)
+        Db.planShoppingAdd recipe.pantry_id (userId model) model.ShoppingLists model.ShoppingItems (ingredientsOf recipe)
 
     { model with
         ShoppingLists = lists
@@ -864,7 +885,7 @@ let update msg model =
         match findRecipe id model.Recipes with
         | None -> model, Cmd.none
         | Some recipe ->
-            let menus, entries, plan = Db.planMenuAdd recipe.pantry_id model.Menus model.MenuRecipes id
+            let menus, entries, plan = Db.planMenuAdd recipe.pantry_id (userId model) model.Menus model.MenuRecipes id
             let menu = List.head menus
             let model = { model with Menus = menus; MenuRecipes = entries }
 
@@ -911,7 +932,7 @@ let update msg model =
             | None -> model, forgetTyping
             | Some pantry ->
                 let lists, items, plan =
-                    Db.planFreeItemAdd pantry model.ShoppingLists model.ShoppingItems model.NewItem
+                    Db.planFreeItemAdd pantry (userId model) model.ShoppingLists model.ShoppingItems model.NewItem
 
                 { model with ShoppingLists = lists; ShoppingItems = items; NewItem = "" },
                 Cmd.batch [ fireAndForget (Db.addToShoppingList plan); forgetTyping ]
@@ -995,7 +1016,7 @@ let update msg model =
     | AddRecipe ->
         match model.NewRecipe, model.Pantry with
         | Some r, Some pantry when r.Title.Trim() <> "" ->
-            let recipe = Db.newRecipe pantry (r.Title.Trim()) r.Body
+            let recipe = Db.newRecipe pantry (userId model) (r.Title.Trim()) r.Body
 
             { model with
                 NewRecipe = None
@@ -1587,6 +1608,18 @@ let private confirmTagDeleteModal (tag: Tag) (recipes: int) dispatch =
 
     confirmModal $"Delete the tag \"{tag.name}\"? {where}" "Delete" Danger CancelTagDelete (DeleteTag tag.id) dispatch
 
+/// The note beside a row saying where it came from: "(Added by Joe)", and on
+/// the shopping list the recipes the item is called for by as well. Quiet and
+/// small, and on a phone on its own line under the row, indented a little, so
+/// a long one doesn't push the row itself into wrapping; at md there is room
+/// for it on the line. `className` carries the size and colour, which differ
+/// by page. Nothing at all when there is nothing to say.
+let private noteSpan (className: string) (note: string) =
+    if note = "" then
+        Html.none
+    else
+        Html.span [ prop.className ("min-w-0 truncate pl-3 md:pl-0 " + className); prop.text note ]
+
 /// A recipe's tags, after its title: small grey rectangles, the same sharp
 /// corners as everything else on the page.
 let private tagBadges (tags: Tag list) =
@@ -1674,11 +1707,12 @@ let private listPage (model: Model) (known: CooklangEditor.KnownNames) dispatch 
                                                 prop.title "Add to menu"
                                                 prop.text "+"
                                                 prop.onClick (fun _ -> dispatch (AddToMenu r.id)) ]
-                                          // Phones: the tags go under the title, indented a
-                                          // little, so a long title and its tags don't fight
-                                          // over the one line. `contents` hands both back to
-                                          // the row at md, where each badge wraps on its own
-                                          // as it did before.
+                                          // Phones: who added it and the tags go under the
+                                          // title, indented a little, so a long title and
+                                          // its tags don't fight over the one line.
+                                          // `contents` hands them all back to the row at md,
+                                          // where each badge wraps on its own as it did
+                                          // before.
                                           Html.div
                                               [ prop.className "flex min-w-0 flex-1 flex-col items-start gap-1 md:contents"
                                                 prop.children
@@ -1687,6 +1721,7 @@ let private listPage (model: Model) (known: CooklangEditor.KnownNames) dispatch 
                                                           dispatch
                                                           [ "recipe"; r.id ]
                                                           r.title
+                                                      noteSpan "text-sm text-gray-400" (addedByNote model r.user_id)
                                                       match tagsOf model r.id with
                                                       | [] -> Html.none
                                                       | tags ->
@@ -2073,11 +2108,11 @@ let private createdAge (createdAt: string) =
 /// A shopping-list row: a tap anywhere on it (text or box) checks it, a
 /// long press turns the text into a field for editing it. The box is only
 /// drawn for the pointer - the row handles the gesture - but still takes
-/// the keyboard. `editing` is the text typed so far while editing. `source`
-/// is the recipes the item comes from, "(Focaccia)", shown beside the text
-/// and left out of it: editing changes the item, never where it came from.
-/// On a phone it drops to a second line of its own instead.
-let private itemRow (id: string) (text: string) (source: string) (isDone: bool) (editing: string option) (onDone: bool -> unit) dispatch =
+/// the keyboard. `editing` is the text typed so far while editing. `note`
+/// is where the item came from, "(Added by Joe, from Focaccia)", shown beside
+/// the text and left out of it: editing changes the item, never where it came
+/// from. On a phone it drops to a second line of its own instead.
+let private itemRow (id: string) (text: string) (note: string) (isDone: bool) (editing: string option) (onDone: bool -> unit) dispatch =
     let field = $"edit-{id}"
 
     Html.li
@@ -2132,9 +2167,10 @@ let private itemRow (id: string) (text: string) (source: string) (isDone: bool) 
                                                   prop.onKeyDown (fun e -> if e.key = "Escape" then dispatch CancelEditItem)
                                                   prop.onBlur (fun _ -> dispatch SaveEditItem) ] ] ]
                             | None ->
-                                // Phones: the recipe goes under the item, indented a
-                                // little, so a long one doesn't push the item itself
-                                // into wrapping. Desktop has room for one line.
+                                // Phones: who added it and the recipes it comes from
+                                // go under the item, indented a little, so a long
+                                // note doesn't push the item itself into wrapping.
+                                // Desktop has room for one line.
                                 Html.div
                                     [ prop.className "flex min-w-0 flex-1 flex-col md:flex-row md:items-center md:gap-2"
                                       prop.children
@@ -2142,13 +2178,9 @@ let private itemRow (id: string) (text: string) (source: string) (isDone: bool) 
                                                 [ prop.className (if isDone then "text-gray-400 line-through" else "")
                                                   prop.text text ]
 
-                                            if source <> "" then
-                                                Html.span
-                                                    [ prop.className (
-                                                          "min-w-0 truncate pl-3 text-sm md:pl-0 "
-                                                          + (if isDone then "text-gray-300" else "text-gray-400")
-                                                      )
-                                                      prop.text source ] ] ] ] ] ] ]
+                                            noteSpan
+                                                ("text-sm " + (if isDone then "text-gray-300" else "text-gray-400"))
+                                                note ] ] ] ] ] ]
 
 let private shoppingListPage (model: Model) dispatch =
     let list = currentList model
@@ -2163,8 +2195,9 @@ let private shoppingListPage (model: Model) dispatch =
     let todo, ``done`` = items |> List.partition (fun i -> i.``done`` = 0)
 
     // Every recipe with the ingredients its Cooklang names, newest first: what
-    // an item's "(Focaccia)" is read off, freshly on every render, so editing a
-    // recipe moves the labels with it.
+    // an item's "from Focaccia" is read off, freshly on every render, so
+    // editing a recipe moves the labels with it. Who added the item is stored
+    // on it, so that half of the note stands still.
     let recipeIngredients =
         model.Recipes
         |> List.map (fun r -> r.title, ingredientsOf r |> List.map (fun i -> i.Name))
@@ -2178,7 +2211,9 @@ let private shoppingListPage (model: Model) dispatch =
         itemRow
             item.id
             (Shared.ShoppingItem.text item.quantity item.unit item.name)
-            (Shared.ShoppingItem.sources recipeIngredients item.name |> Shared.ShoppingItem.sourceText)
+            (Shared.Note.text
+                [ Shared.Note.addedBy (whoAdded model item.user_id)
+                  Shared.Note.from (Shared.ShoppingItem.sources recipeIngredients item.name) ])
             (item.``done`` <> 0)
             editing
             (fun isDone -> dispatch (SetShoppingItemDone(item.id, isDone)))
@@ -2351,10 +2386,12 @@ let private menuPage (model: Model) dispatch =
                                   [ prop.key e.id
                                     prop.children
                                         [ Html.div
-                                              [ prop.className "flex items-center gap-2"
+                                              [ prop.className "flex items-start gap-2 md:items-center"
                                                 prop.children
                                                     [ // Same left edge and padding as the × on the
                                                       // recipe list, so the two pages line up.
+                                                      // `items-start`, since the title and its notes
+                                                      // stack beside them on a phone.
                                                       Html.span
                                                           [ prop.className "w-6 shrink-0 px-1 text-left text-sm text-gray-500 tabular-nums"
                                                             prop.text $"{i + 1}." ]
@@ -2364,11 +2401,24 @@ let private menuPage (model: Model) dispatch =
                                                             prop.title "Remove from menu"
                                                             prop.text "×"
                                                             prop.onClick (fun _ -> dispatch (ConfirmMenuRemove e.id)) ]
-                                                      linkWith "text-blue-600 underline hover:text-blue-800" dispatch [ "recipe"; r.id ] r.title
-                                                      if inShoppingList then
-                                                          Html.span
-                                                              [ prop.className "text-xs text-gray-500"
-                                                                prop.text "(in shopping list)" ] ] ]
+                                                      // Phones: the note goes under the title,
+                                                      // indented a little, rather than crowding
+                                                      // it off the line; `contents` puts it
+                                                      // back on it at md.
+                                                      Html.div
+                                                          [ prop.className
+                                                                "flex min-w-0 flex-1 flex-col items-start md:contents"
+                                                            prop.children
+                                                                [ linkWith
+                                                                      "text-blue-600 underline hover:text-blue-800"
+                                                                      dispatch
+                                                                      [ "recipe"; r.id ]
+                                                                      r.title
+                                                                  noteSpan
+                                                                      "text-sm text-gray-400"
+                                                                      (Shared.Note.text
+                                                                          [ Shared.Note.addedBy (whoAdded model e.user_id)
+                                                                            if inShoppingList then "in shopping list" ]) ] ] ] ]
                                           sidesTree
                                               e.id
                                               (model.MenuSides |> List.filter (fun s -> s.menu_recipe_id = e.id))

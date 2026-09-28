@@ -68,8 +68,31 @@ let ``two recipes of the same name count once`` () =
 let ``a nameless line comes from nowhere`` () =
     Assert.Equal<string list>([], ShoppingItem.sources ([ focaccia ] |> List.map ingredientsOf) "  ")
 
+/// The note the shopping list builds: who put the item there, then the
+/// recipes calling for it.
+let private itemNote (who: string option) (recipes: string list) =
+    Note.text [ Note.addedBy who; Note.from recipes ]
+
 [<Fact>]
 let ``the recipes read as a parenthesis after the line`` () =
-    Assert.Equal("", ShoppingItem.sourceText [])
-    Assert.Equal("(Focaccia)", ShoppingItem.sourceText [ "Focaccia" ])
-    Assert.Equal("(Focaccia, Pizza)", ShoppingItem.sourceText [ "Focaccia"; "Pizza" ])
+    Assert.Equal("", itemNote None [])
+    Assert.Equal("(from Focaccia)", itemNote None [ "Focaccia" ])
+    Assert.Equal("(from Focaccia, Pizza)", itemNote None [ "Focaccia"; "Pizza" ])
+
+[<Fact>]
+let ``who added it comes first, and stands alone when no recipe calls for it`` () =
+    Assert.Equal("(Added by Joe)", itemNote (Some "Joe") [])
+    Assert.Equal("(Added by Joe, from Focaccia, Pizza)", itemNote (Some "Joe") [ "Focaccia"; "Pizza" ])
+
+[<Fact>]
+let ``a nameless adder is no adder`` () =
+    Assert.Equal("", itemNote (Some "  ") [])
+    Assert.Equal("(from Focaccia)", itemNote (Some "") [ "Focaccia" ])
+
+[<Fact>]
+let ``a menu entry says who added it and whether the list covers it`` () =
+    let entryNote who inList = Note.text [ Note.addedBy who; (if inList then "in shopping list" else "") ]
+    Assert.Equal("(Added by Joe, in shopping list)", entryNote (Some "Joe") true)
+    Assert.Equal("(Added by Joe)", entryNote (Some "Joe") false)
+    Assert.Equal("(in shopping list)", entryNote None true)
+    Assert.Equal("", entryNote None false)

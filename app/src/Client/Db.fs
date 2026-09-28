@@ -35,9 +35,12 @@ type PantryMember =
 /// Row shape of the local `recipes` table. Field names match SQLite columns.
 /// `pantry_id`, here and on every row below, is the pantry it belongs to:
 /// what the pages filter by, and what decides who else can see it.
+/// `user_id` is who made it, which the pages show as "(Added by Joe)"; it is
+/// stamped by the server on upload, so a row that predates it is ''.
 type Recipe =
     { id: string
       pantry_id: string
+      user_id: string
       title: string
       body: string
       created_at: string }
@@ -54,6 +57,7 @@ type ShoppingList =
 type ShoppingItem =
     { id: string
       pantry_id: string
+      user_id: string
       list_id: string
       name: string
       quantity: string
@@ -73,6 +77,7 @@ type Menu =
 type MenuRecipe =
     { id: string
       pantry_id: string
+      user_id: string
       menu_id: string
       recipe_id: string
       created_at: string }
@@ -211,11 +216,16 @@ let db =
             "status", column.text
             "created_at", column.text ]
           "recipes",
-          [ "pantry_id", column.text; "title", column.text; "body", column.text; "created_at", column.text ]
+          [ "pantry_id", column.text
+            "user_id", column.text
+            "title", column.text
+            "body", column.text
+            "created_at", column.text ]
           "shopping_lists",
           [ "pantry_id", column.text; "name", column.text; "created_at", column.text; "archived_at", column.text ]
           "shopping_items",
           [ "pantry_id", column.text
+            "user_id", column.text
             "list_id", column.text
             "name", column.text
             "quantity", column.text
@@ -225,7 +235,11 @@ let db =
           "menus",
           [ "pantry_id", column.text; "name", column.text; "created_at", column.text; "archived_at", column.text ]
           "menu_recipes",
-          [ "pantry_id", column.text; "menu_id", column.text; "recipe_id", column.text; "created_at", column.text ]
+          [ "pantry_id", column.text
+            "user_id", column.text
+            "menu_id", column.text
+            "recipe_id", column.text
+            "created_at", column.text ]
           "menu_sides",
           [ "pantry_id", column.text
             "menu_recipe_id", column.text
@@ -349,9 +363,11 @@ let signIn (returnTo: string) =
 
 /// Live list of recipes; `onChange` fires with the full set on every change.
 let watchRecipes (onChange: Recipe list -> unit) =
-    // Rows synced before `body` existed have NULL there; the UI wants a string.
+    // Rows synced before `body` or `user_id` existed have NULL there; the UI
+    // wants a string.
     let sql =
-        "SELECT id, pantry_id, title, COALESCE(body, '') AS body, created_at FROM recipes ORDER BY created_at DESC"
+        "SELECT id, pantry_id, COALESCE(user_id, '') AS user_id, title, COALESCE(body, '') AS body, created_at "
+        + "FROM recipes ORDER BY created_at DESC"
 
     let query = db.query<Recipe> {| sql = sql; parameters = [||] |}
 
@@ -378,7 +394,8 @@ let watchShoppingLists (onChange: ShoppingList list -> unit) =
 /// first within each group. The UI picks out the list it is showing.
 let watchShoppingItems (onChange: ShoppingItem list -> unit) =
     let sql =
-        "SELECT id, pantry_id, list_id, name, quantity, unit, done, created_at FROM shopping_items ORDER BY done, created_at, id"
+        "SELECT id, pantry_id, COALESCE(user_id, '') AS user_id, list_id, name, quantity, unit, done, created_at "
+        + "FROM shopping_items ORDER BY done, created_at, id"
 
     let query = db.query<ShoppingItem> {| sql = sql; parameters = [||] |}
 
@@ -402,7 +419,9 @@ let watchMenus (onChange: Menu list -> unit) =
 /// Live menu entries across every menu, in the order they were added. The
 /// UI picks out the menu it is showing.
 let watchMenuRecipes (onChange: MenuRecipe list -> unit) =
-    let sql = "SELECT id, pantry_id, menu_id, recipe_id, created_at FROM menu_recipes ORDER BY created_at, id"
+    let sql =
+        "SELECT id, pantry_id, COALESCE(user_id, '') AS user_id, menu_id, recipe_id, created_at "
+        + "FROM menu_recipes ORDER BY created_at, id"
     let query = db.query<MenuRecipe> {| sql = sql; parameters = [||] |}
 
     query.watch().registerListener
@@ -423,18 +442,21 @@ let watchSyncFailing (onChange: bool -> unit) =
     db.registerListener (createObj [ "statusChanged" ==> report ]) |> ignore
 
 /// The row a new recipe becomes. Built by the caller so the UI can show it
-/// before the insert lands.
-let newRecipe (pantryId: string) (title: string) (body: string) : Recipe =
+/// before the insert lands. `userId` is written here as well as stamped by
+/// the server on upload, so "(Added by Joe)" is there from the first render
+/// rather than appearing when sync comes back.
+let newRecipe (pantryId: string) (userId: string) (title: string) (body: string) : Recipe =
     { id = string (Guid.NewGuid())
       pantry_id = pantryId
+      user_id = userId
       title = title
       body = body
       created_at = nowIso () }
 
 let addRecipe (recipe: Recipe) =
     db.execute (
-        "INSERT INTO recipes (id, pantry_id, title, body, created_at) VALUES (?, ?, ?, ?, ?)",
-        [| recipe.id; recipe.pantry_id; recipe.title; recipe.body; recipe.created_at |]
+        "INSERT INTO recipes (id, pantry_id, user_id, title, body, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        [| recipe.id; recipe.pantry_id; recipe.user_id; recipe.title; recipe.body; recipe.created_at |]
     )
 
 let updateRecipe (id: string) (title: string) (body: string) =
@@ -507,6 +529,7 @@ type ShoppingPlan =
 /// show them, plus the plan.
 let private planAdd
     (pantryId: string)
+    (userId: string)
     (lists: ShoppingList list)
     (items: ShoppingItem list)
     (entries: (string * Quantity option * string) list)
@@ -537,6 +560,7 @@ let private planAdd
             let row =
                 { id = string (Guid.NewGuid())
                   pantry_id = pantryId
+                  user_id = userId
                   list_id = listId
                   name = name
                   quantity = quantityText quantity
@@ -560,12 +584,12 @@ let private planAdd
       Inserted = items |> List.filter (fun i -> inserted.Contains i.id) }
 
 /// A recipe's ingredients.
-let planShoppingAdd pantryId lists items (ingredients: Cooklang.Ingredient list) =
-    planAdd pantryId lists items (ingredients |> List.map (fun i -> i.Name, i.Quantity, defaultArg i.Unit ""))
+let planShoppingAdd pantryId userId lists items (ingredients: Cooklang.Ingredient list) =
+    planAdd pantryId userId lists items (ingredients |> List.map (fun i -> i.Name, i.Quantity, defaultArg i.Unit ""))
 
 /// One item typed on the list page, taken as-is for the name.
-let planFreeItemAdd pantryId lists items (text: string) =
-    planAdd pantryId lists items [ text.Trim(), None, "" ]
+let planFreeItemAdd pantryId userId lists items (text: string) =
+    planAdd pantryId userId lists items [ text.Trim(), None, "" ]
 
 let addToShoppingList (plan: ShoppingPlan) =
     promise {
@@ -587,8 +611,8 @@ let addToShoppingList (plan: ShoppingPlan) =
         for row in plan.Inserted do
             let! _ =
                 db.execute (
-                    "INSERT INTO shopping_items (id, pantry_id, list_id, name, quantity, unit, done, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
-                    [| row.id; row.pantry_id; row.list_id; row.name; row.quantity; row.unit; row.created_at |]
+                    "INSERT INTO shopping_items (id, pantry_id, user_id, list_id, name, quantity, unit, done, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
+                    [| row.id; row.pantry_id; row.user_id; row.list_id; row.name; row.quantity; row.unit; row.created_at |]
                 )
 
             ()
@@ -616,7 +640,7 @@ type MenuPlan = { NewMenu: Menu option; Inserted: MenuRecipe }
 /// Every add is a new row, so a recipe can be on a menu twice. Pure, like
 /// `planShoppingAdd`: returns the menus and entries as the UI should now
 /// show them, plus the plan.
-let planMenuAdd (pantryId: string) (menus: Menu list) (entries: MenuRecipe list) (recipeId: string) =
+let planMenuAdd (pantryId: string) (userId: string) (menus: Menu list) (entries: MenuRecipe list) (recipeId: string) =
     let target, newMenu =
         match menus with
         | m :: _ -> m, None
@@ -632,6 +656,7 @@ let planMenuAdd (pantryId: string) (menus: Menu list) (entries: MenuRecipe list)
     let entry =
         { id = string (Guid.NewGuid())
           pantry_id = pantryId
+          user_id = userId
           menu_id = target.id
           recipe_id = recipeId
           created_at = nowIso () }
@@ -659,8 +684,8 @@ let addToMenu (plan: MenuPlan) =
 
         let! _ =
             db.execute (
-                "INSERT INTO menu_recipes (id, pantry_id, menu_id, recipe_id, created_at) VALUES (?, ?, ?, ?, ?)",
-                [| e.id; e.pantry_id; e.menu_id; e.recipe_id; e.created_at |]
+                "INSERT INTO menu_recipes (id, pantry_id, user_id, menu_id, recipe_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                [| e.id; e.pantry_id; e.user_id; e.menu_id; e.recipe_id; e.created_at |]
             )
 
         ()

@@ -19,6 +19,34 @@ module Created =
         | 1 -> "yesterday"
         | d -> $"{d} days ago"
 
+/// The grey note beside a row, saying what there is to say about where it
+/// came from: who put it there, which recipes a shopping-list item is called
+/// for by, whether a menu entry's ingredients are on the list. One
+/// parenthesis, however many of those there are to fill it - "(Added by Joe,
+/// from Focaccia, Pizza)", "(Added by Joe, in shopping list)".
+module Note =
+    /// "Added by Joe", and nothing at all when there is nobody to name: a row
+    /// made before rows remembered who made them, or one made by someone
+    /// whose membership of the pantry has not synced yet.
+    let addedBy (who: string option) =
+        match who with
+        | Some who when who.Trim() <> "" -> $"Added by {who.Trim()}"
+        | _ -> ""
+
+    /// "from Focaccia, Pizza", and nothing at all when no recipe calls for it.
+    let from (recipes: string list) =
+        match recipes with
+        | [] -> ""
+        | titles -> "from " + String.concat ", " titles
+
+    /// Whichever of `parts` there are, in one parenthesis. The blank ones are
+    /// dropped, so a caller lists everything a row could say and gets only
+    /// what it does say; nothing at all when it says nothing.
+    let text (parts: string list) =
+        match parts |> List.filter (fun part -> part <> "") with
+        | [] -> ""
+        | parts -> "(" + String.concat ", " parts + ")"
+
 /// A shopping list is only a name for now: the client and the MCP tools
 /// both add to the newest one, and create one named after today when the
 /// user has none. Names are free text and may repeat.
@@ -61,12 +89,6 @@ module ShoppingItem =
             |> List.filter (fun (_, ingredients) -> ingredients |> List.exists (fun i -> key i = name))
             |> List.map fst
             |> List.distinct
-
-    /// How those recipes read after the line: "(Focaccia)", "(Focaccia, Pizza)".
-    let sourceText (titles: string list) =
-        match titles with
-        | [] -> ""
-        | titles -> "(" + String.concat ", " titles + ")"
 
 /// A menu is a shopping list's twin for recipes: a name, and the recipes
 /// added to it. Adding goes into the newest one, created on first use and
