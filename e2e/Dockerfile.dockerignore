@@ -1,0 +1,11 @@
+**/bin/
+**/obj/
+**/node_modules/
+**/fable-out/
+**/dist/
+**/.vite/
+**/.playwright/
+app/TestResults/
+e2e/screenshots/
+.git/
+infra/

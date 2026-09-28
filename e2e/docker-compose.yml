@@ -1,0 +1,33 @@
+name: plaintextpantry-e2e
+
+# Nothing here talks to Postgres, PowerSync, Keycloak or the F# server: `app`
+# is the real client in front of the mock backend in ./mock, and `tests` is a
+# browser pointed at it. Run it with ./run.sh.
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile
+      target: app
+    # Only for looking at it by hand; the tests reach it over the compose
+    # network. Free the port (or change it) if 8099 is taken.
+    ports:
+      - "127.0.0.1:8099:8080"
+
+  tests:
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile
+      target: tests
+    depends_on:
+      app:
+        condition: service_healthy
+    # Share the app's network namespace so the browser opens it on localhost.
+    # A bare hostname over plain http is a browser fight not worth having -
+    # Chrome upgrades it to https - and localhost is a secure origin, which is
+    # what the real app is served on and what its service worker needs.
+    network_mode: "service:app"
+    environment:
+      APP_URL: http://localhost:8080
+      CI: "true"

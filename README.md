@@ -10,6 +10,16 @@ edit your recipes and lists on your behalf.
 
 Live at [plaintextpantry.com](https://plaintextpantry.com).
 
+## On a phone
+
+| Recipes | A recipe | Shopping list | Menu | Settings |
+|:--:|:--:|:--:|:--:|:--:|
+| <img src="e2e/screenshots/recipes.png" alt="The recipe list, with tag filters across the top" width="150"> | <img src="e2e/screenshots/recipe-cooklang.png" alt="A recipe open on its Cooklang tab, syntax highlighted" width="150"> | <img src="e2e/screenshots/shopping-list.png" alt="The shopping list, items noting the recipe they came from" width="150"> | <img src="e2e/screenshots/menu.png" alt="The menu, four recipes with sides under them" width="150"> | <img src="e2e/screenshots/settings.png" alt="Settings: the pantry name, its QR code and its members" width="150"> |
+
+Taken at iPhone SE size by the run in [`e2e/`](e2e): the real client against a
+mock backend, so the household is invented but nothing about the app is.
+`./e2e/run.sh` retakes them, and needs only Docker.
+
 ## Built with
 
 Everything is F#, front to back, with one Cooklang parser shared by both.
@@ -34,6 +44,7 @@ infra/docker       Local compose stack, Postgres schema + migrations, PowerSync 
 infra/keycloak     Realm provisioning and the login theme
 infra/terraform    AWS resources
 infra/deploy       Production compose stack and the script that applies it on the box
+e2e                Screenshot run: the real client against a mock backend, in Docker
 ```
 
 Everything belongs to a **pantry**: a household with an owner, a name and a
@@ -61,6 +72,7 @@ leaving the app.
 
 - `./dev.sh down` stops the containers; `./dev.sh reset` also wipes their data.
 - Tests: `cd app && dotnet test tests/Shared.Tests`.
+- Screenshots: `./e2e/run.sh` — needs Docker and none of the above running.
 - The MCP endpoint is at `http://localhost:5050/mcp` and works with the dev user.
 
 Schema changes go in two places: `infra/docker/postgres/init/01-init.sh`

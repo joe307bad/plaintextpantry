@@ -9,6 +9,10 @@ fable-out/
 dist/
 .vite/
 
+# Playwright (e2e)
+.playwright/
+test-results/
+
 # OS / editor
 .DS_Store
 .idea/

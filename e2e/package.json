@@ -1,0 +1,12 @@
+{
+  "name": "plaintextpantry-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "mock": "node mock/server.js",
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}
