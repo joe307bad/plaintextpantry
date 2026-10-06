@@ -13,6 +13,28 @@
 {$DOMAIN} {
     encode zstd gzip
 
+    # Sent on everything this site serves, pages and API alike.
+    #
+    # HSTS: the redirect above is a hop an attacker on the network gets to
+    # see; after one visit the browser stops making it. `includeSubDomains`
+    # covers auth.<domain>, which is Keycloak and sets its own as well.
+    #
+    # The CSP here carries one directive on purpose. `frame-ancestors` is the
+    # clickjacking fix and breaks nothing; a full policy has to account for
+    # the SQLite WebAssembly, the workers PowerSync starts from blobs and the
+    # stylesheet CodeMirror injects at runtime, so it wants testing against a
+    # production build rather than a line added here in good faith.
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        Content-Security-Policy "frame-ancestors 'none'"
+        X-Frame-Options "DENY"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        # Nothing here asks for any of them.
+        Permissions-Policy "geolocation=(), microphone=(), payment=(), usb=()"
+        -Server
+    }
+
     handle /health {
         respond "OK" 200
     }

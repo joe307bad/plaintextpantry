@@ -62,7 +62,7 @@ let private upload (config: Config) : HttpHandler =
             match Decode.fromString Codec.decodeCrudOps body with
             | Error err -> return! RequestErrors.BAD_REQUEST err next ctx
             | Ok ops ->
-                let! applied = Db.applyCrud config.ConnectionString user.Id ops
+                let! applied = Db.applyCrud config.ConnectionString user ops
                 Server.Usage.changes config "app" (counted applied)
                 return! Successful.NO_CONTENT next ctx
         }
@@ -77,9 +77,12 @@ let private upload (config: Config) : HttpHandler =
 let private pageview (config: Config) : HttpHandler =
     fun next ctx ->
         task {
-            use reader = new StreamReader(ctx.Request.Body)
-            let! body = reader.ReadToEndAsync()
-            let section = body.Trim()
+            // The longest section name is well under this. Reading the body
+            // to its end would let an unauthenticated request decide how much
+            // memory to spend here; reading a mouthful cannot.
+            let buffer = Array.zeroCreate<byte> 64
+            let! read = ctx.Request.Body.ReadAtLeastAsync(buffer, buffer.Length, throwOnEndOfStream = false)
+            let section = Text.Encoding.UTF8.GetString(buffer, 0, read).Trim()
 
             if Shared.Usage.isSection section then
                 Server.Usage.pageview config section

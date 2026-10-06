@@ -226,11 +226,28 @@ let private decide (conn: NpgsqlConnection) tx (userId: string) (op: CrudOp) : T
         | other, _ -> return failwithf "Unknown op '%s'" other
     }
 
-let private buildCommand (conn: NpgsqlConnection) (tx: NpgsqlTransaction) (userId: string) (op: CrudOp) =
+let private buildCommand (conn: NpgsqlConnection) (tx: NpgsqlTransaction) (user: User) (op: CrudOp) =
+    let userId = user.Id
+
     let columns =
         match Map.tryFind op.Table tables with
         | Some cols -> cols
         | None -> failwithf "Table '%s' is not writable" op.Table
+
+    // Who a member row says it is, is the server's to say. A join is a row the
+    // joiner writes about themselves and the owner then approves on sight of
+    // it - so left to the client, "Sam (sam@example.com) wants in" is a
+    // sentence anyone who has the pantry's id can compose about anyone. The
+    // address and name come from the token instead, like `user_id` does.
+    let op =
+        if op.Table = "pantry_members" && op.Op = "PUT" then
+            { op with
+                Data =
+                    op.Data
+                    |> Map.add "email" (Some user.Email)
+                    |> Map.add "name" (Some user.Name) }
+        else
+            op
 
     // Only columns present in the upload, in whitelist order.
     let present = columns |> List.filter (fun (c, _) -> op.Data.ContainsKey c)
@@ -290,7 +307,7 @@ let private buildCommand (conn: NpgsqlConnection) (tx: NpgsqlTransaction) (userI
 /// ops that reached the database. The usage counters are drawn from the
 /// return value rather than from the request, so a write someone was not
 /// allowed to make is not counted as one that happened.
-let applyCrud (connectionString: string) (userId: string) (ops: CrudOp list) : Task<CrudOp list> =
+let applyCrud (connectionString: string) (user: User) (ops: CrudOp list) : Task<CrudOp list> =
     task {
         use conn = new NpgsqlConnection(connectionString)
         do! conn.OpenAsync()
@@ -304,10 +321,10 @@ let applyCrud (connectionString: string) (userId: string) (ops: CrudOp list) : T
             if not (Map.containsKey op.Table tables) then
                 failwithf "Table '%s' is not writable" op.Table
 
-            match! decide conn tx userId op with
+            match! decide conn tx user.Id op with
             | Skip reason -> eprintfn "upload: skipped %s %s %s (%s)" op.Op op.Table op.Id reason
             | Apply ->
-                use cmd = buildCommand conn tx userId op
+                use cmd = buildCommand conn tx user op
                 let! _ = cmd.ExecuteNonQueryAsync()
                 applied.Add op
 

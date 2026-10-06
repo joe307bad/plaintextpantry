@@ -10,6 +10,9 @@ open ModelContextProtocol.Protocol
 [<EntryPoint>]
 let main args =
     let config = Config.load ()
+    // Nothing starts if this is a deployment still using the development
+    // secrets that ship in the repository.
+    Config.check config
 
     let builder = WebApplication.CreateBuilder(args)
     builder.Services.AddSingleton config |> ignore

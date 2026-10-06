@@ -23,8 +23,10 @@ CREATE TABLE pantries (
 );
 
 -- One row per person in a pantry. Postgres only ever sees Keycloak subjects,
--- so a member's own client writes their email and name here for the owner to
--- recognise them by. Joining is by scanning the owner's QR code, which lands
+-- so the email and name are kept here for the owner to recognise them by -
+-- written by the server from the joiner's own token, never from what their
+-- client asked for (Server/Db.buildCommand), since this is what an owner
+-- reads before approving somebody. Joining is by scanning the owner's QR code, which lands
 -- a 'pending' row; the owner approves it, and it becomes 'approved'.
 CREATE TABLE pantry_members (
     id          uuid PRIMARY KEY,
