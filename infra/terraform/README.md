@@ -87,17 +87,18 @@ that user directly (`DEV_AUTO_LOGIN`), so `/login` is still there to work on.
    `deploy.sh` re-provisions the realm on every deploy, so the identity
    provider appears (and the password form disappears) on the next run.
 
-6. **Usage counters** (optional). The server writes them to the
-   observability box shared with fastbreak, and needs that app's write key -
-   `fly secrets list -a fastbreak-o11y`, or `API_KEY` in its `o11y/.env`:
+6. **Usage counters** (optional). The server can write totals - pages
+   opened, sign-ins, recipes created, and so on, naming nobody - to a QuestDB
+   that accepts line protocol over HTTP. Point `O11Y_ENDPOINT` at it in
+   `infra/deploy/docker-compose.yml` and put the write key in:
 
    ```sh
    aws ssm put-parameter --overwrite --type SecureString --name /plaintextpantry/O11Y_API_KEY --value '<key>'
    gh workflow run deploy.yml
    ```
 
-   Without it the server counts nothing, quietly. Terraform does not reserve
-   this one - see the note in `secrets.tf` for why.
+   Without the key the server counts nothing, quietly. Terraform does not
+   reserve this one - see the note in `secrets.tf` for why.
 
 Commit the `.terraform.lock.hcl` files (already present) so CI and local
 runs use the same provider builds.

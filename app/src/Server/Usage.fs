@@ -1,11 +1,11 @@
-/// Usage counters, written to the shared observability server.
+/// Usage counters, written to a QuestDB if one is configured.
 ///
-/// The store is the QuestDB instance behind `fastbreak-o11y.fly.dev` - the one
-/// the Fastbreak mobile app and topspin.blog already write to - reached through
-/// its Caddy `/write` endpoint in InfluxDB line protocol. Grafana reads it at
-/// `/grafana`; the "Plaintext Pantry" dashboard there is the picture of the
-/// three tables written here, and its definition lives beside the others, in
-/// `o11y/grafana/plaintextpantry-dashboard.py` in the fastbreak repository.
+/// The store is a QuestDB, wherever `O11Y_ENDPOINT` points: one POST of
+/// InfluxDB line protocol to its `/write`, with the write key in an
+/// `X-API-Key` header. Nothing here is specific to a particular host or a
+/// particular dashboard, and without an endpoint and a key - which a fresh
+/// deployment has neither of - nothing is written at all. Three tables, which
+/// ILP creates on first write:
 ///
 ///     ptp_pageview   env, section, value, timestamp
 ///     ptp_login      env, provider, value, timestamp

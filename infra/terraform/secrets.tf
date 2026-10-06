@@ -64,10 +64,10 @@ resource "aws_ssm_parameter" "google" {
   }
 }
 
-# `/plaintextpantry/O11Y_API_KEY` - the write key for the observability box
-# shared with fastbreak, which the server sends usage counters with - is
-# deliberately NOT reserved here. It is the fastbreak app's key
-# (`fly secrets list -a fastbreak-o11y`), it is written straight in:
+# `/plaintextpantry/O11Y_API_KEY` - the write key for whatever QuestDB the
+# server sends usage counters to, if any - is deliberately NOT reserved here.
+# It belongs to that other service, not to this stack, so it is written
+# straight in:
 #
 #   aws ssm put-parameter --overwrite --type SecureString \
 #     --name /plaintextpantry/O11Y_API_KEY --value '<key>'

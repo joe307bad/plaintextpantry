@@ -108,25 +108,11 @@ no SSH; for a shell on the box use
 and `docker compose logs -f server`. Secrets live in SSM Parameter Store
 under `/plaintextpantry/*`.
 
-## What gets used
+## Who is using it
 
-Two questions, two places, because they want different things: how much the
-app is being used, and who is using it.
-
-**How much** is a Grafana dashboard on the observability box this project
-shares with [fastbreak](https://github.com/joe307bad/fastbreak) and topspin —
-<https://fastbreak-o11y.fly.dev/grafana>, dashboard **Plaintext Pantry**. The
-server writes the counters behind it ([`Usage.fs`](app/src/Server/Usage.fs)):
-pages opened, sign-ins, recipes created, pantries shared, and the MCP calls
-that changed something. Totals only — no user id, no session, nothing that
-says which of them was whom — and no key in Parameter Store means no
-counting at all. The dashboard itself is defined by
-`o11y/grafana/plaintextpantry-dashboard.py` in the fastbreak repository; edit
-there and re-run it.
-
-**Who** is Keycloak's, since it is the only thing that sees a sign-in as a
-person. It keeps login events for 90 days (turned on by `provision.sh`), and
-this prints them, a column of addresses and a column of counts:
+Keycloak is the only thing that sees a sign-in as a person, so it is where
+that question is answered. It keeps login events for 90 days (turned on by
+`provision.sh`), and this prints them:
 
 ```sh
 ./user-activity.sh        # every sign-in there is a record of
@@ -143,15 +129,16 @@ this prints them, a column of addresses and a column of counts:
 `logins` is sign-ins; `days` is days the app was opened, which is the one to
 read for someone who signed in once in March and has been cooking from it ever
 since — the app renews its session against Keycloak once a day, so a day of
-use leaves a mark without a login.
+use leaves a mark without a login. Only sign-ins since events were switched on
+are in there; there is no record from before that.
 
-[`user-activity.sh`](user-activity.sh) runs [`infra/deploy/user-activity.sh`](infra/deploy/user-activity.sh)
-on the box through SSM Run Command, which needs no SSH and no
-session-manager plugin. Away from a checkout, that is:
+[`user-activity.sh`](user-activity.sh) runs
+[`infra/deploy/user-activity.sh`](infra/deploy/user-activity.sh) on the box
+through SSM Run Command, which needs no SSH and no session-manager plugin. On
+a host reached some other way, run that second script there instead.
 
-```sh
-C=$(aws ssm send-command --targets Key=tag:Name,Values=plaintextpantry --document-name AWS-RunShellScript --parameters 'commands=["/opt/plaintextpantry/user-activity.sh"]' --query Command.CommandId --output text) && sleep 6 && aws ssm list-command-invocations --command-id "$C" --details --query 'CommandInvocations[0].CommandPlugins[0].Output' --output text
-```
-
-Both only know about sign-ins since events were switched on, so the record
-starts at the deploy that shipped them.
+The server can also count usage itself — pages opened, sign-ins, recipes
+created, pantries shared, MCP calls that changed something, as totals that
+name nobody — by writing [line protocol](app/src/Server/Usage.fs) to a QuestDB
+somewhere. It is off unless `O11Y_ENDPOINT` and `O11Y_API_KEY` are set, which
+on a fresh deployment they are not.

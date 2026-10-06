@@ -144,10 +144,9 @@ services:
       POWERSYNC_URL: https://${DOMAIN}/powersync
       POWERSYNC_JWT_SECRET: ${POWERSYNC_JWT_SECRET}
       DATA_PROTECTION_KEYS_DIR: /keys
-      # Usage counters (app/src/Server/Usage.fs) go to the observability box
-      # shared with fastbreak and topspin; the Grafana dashboard reading them
-      # is o11y/grafana/plaintextpantry-dashboard.py in the fastbreak repo.
-      # No key in Parameter Store, no counting - see deploy.sh.
+      # Usage counters (app/src/Server/Usage.fs): totals that name nobody,
+      # written as line protocol to a QuestDB that accepts it. No key in
+      # Parameter Store, no counting at all - see deploy.sh.
       O11Y_ENDPOINT: https://fastbreak-o11y.fly.dev
       O11Y_API_KEY: ${O11Y_API_KEY}
       O11Y_ENV: prod

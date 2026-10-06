@@ -31,9 +31,9 @@ type Config =
       /// in the user profile; prod bind-mounts a directory on the data
       /// volume so a redeploy doesn't sign everyone out. See Auth.configure.
       DataProtectionKeysDir: string option
-      /// The shared observability server (fastbreak-o11y) that usage counters
-      /// are written to, and the key that gets a write in. Either one empty -
-      /// local dev, CI - is the off switch: see Usage.fs.
+      /// A QuestDB that usage counters are written to, and the key that gets a
+      /// write in. Either one empty - local dev, CI, a deployment that wants
+      /// no counters - is the off switch: see Usage.fs.
       O11yEndpoint: string
       O11yApiKey: string
       /// The tag every counter row carries, so a developer clicking around is
