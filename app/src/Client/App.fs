@@ -1745,6 +1745,11 @@ let private noteSpan (className: string) (note: string) =
 /// How long the recipe takes from starting to cook to it reaching the table,
 /// right of its title: "(45min)". Quiet and grey, like the note beside it.
 ///
+/// An inline span, with its own leading space, so it is part of the title's
+/// run of text rather than a column beside it: a title too long for the line
+/// wraps and takes the time with it, instead of the time holding its own
+/// place at the right and squeezing the title into wrapping sooner.
+///
 /// Nothing at all when the recipe gives nothing to work it out from (see
 /// `Cooklang.totalMinutes`): a guess at how long dinner takes is worse than
 /// no figure, and the row reads the same as it always did until someone
@@ -1754,9 +1759,22 @@ let private timeBadge (body: string) =
     | None -> Html.none
     | Some minutes ->
         Html.span
-            [ prop.className "shrink-0 text-sm text-gray-400 tabular-nums"
+            [ prop.className "text-sm text-gray-400 tabular-nums"
               prop.title "Total time, start to table"
-              prop.text $"({minutes}min)" ]
+              prop.text $" ({minutes}min)" ]
+
+/// A recipe's title and how long it takes, as one run of text: the time sits
+/// directly after the title and breaks to the next line with it.
+///
+/// `lg:contents` dissolves this again on a wide screen, where the title, the
+/// time and everything after them are items of the row itself and there is
+/// room for the lot on one line.
+let private titleWithTime (recipe: Recipe) dispatch =
+    Html.div
+        [ prop.className "min-w-0 max-w-full lg:contents"
+          prop.children
+              [ linkWith "text-blue-600 underline hover:text-blue-800" dispatch [ "recipe"; recipe.id ] recipe.title
+                timeBadge recipe.body ] ]
 
 /// A recipe's tags, after its title: small grey rectangles, the same sharp
 /// corners as everything else on the page.
@@ -1854,19 +1872,7 @@ let private listPage (model: Model) (known: CooklangEditor.KnownNames) dispatch 
                                           Html.div
                                               [ prop.className "flex min-w-0 flex-1 flex-col items-start gap-1 lg:contents"
                                                 prop.children
-                                                    [ // The title and the time it takes are one
-                                                      // thing: the time stays on the title's line
-                                                      // on a phone, where everything else under it
-                                                      // has gone to a line of its own.
-                                                      Html.div
-                                                          [ prop.className "flex min-w-0 max-w-full items-baseline gap-1.5"
-                                                            prop.children
-                                                                [ linkWith
-                                                                      "text-blue-600 underline hover:text-blue-800"
-                                                                      dispatch
-                                                                      [ "recipe"; r.id ]
-                                                                      r.title
-                                                                  timeBadge r.body ] ]
+                                                    [ titleWithTime r dispatch
                                                       noteSpan "text-sm text-gray-400" (addedByNote model r.user_id)
                                                       match tagsOf model r.id with
                                                       | [] -> Html.none
@@ -2555,16 +2561,7 @@ let private menuPage (model: Model) dispatch =
                                                           [ prop.className
                                                                 "flex min-w-0 flex-1 flex-col items-start lg:contents"
                                                             prop.children
-                                                                [ Html.div
-                                                                      [ prop.className
-                                                                            "flex min-w-0 max-w-full items-baseline gap-1.5"
-                                                                        prop.children
-                                                                            [ linkWith
-                                                                                  "text-blue-600 underline hover:text-blue-800"
-                                                                                  dispatch
-                                                                                  [ "recipe"; r.id ]
-                                                                                  r.title
-                                                                              timeBadge r.body ] ]
+                                                                [ titleWithTime r dispatch
                                                                   noteSpan
                                                                       "text-sm text-gray-400"
                                                                       (Shared.Note.text
