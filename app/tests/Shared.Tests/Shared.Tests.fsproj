@@ -7,6 +7,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="CooklangTests.fs" />
+    <Compile Include="RecipeTimeTests.fs" />
     <Compile Include="ShoppingListTests.fs" />
     <Compile Include="MenuTests.fs" />
     <Compile Include="TagTests.fs" />

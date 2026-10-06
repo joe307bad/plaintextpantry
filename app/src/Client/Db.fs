@@ -163,6 +163,10 @@ module private Api =
                 | Error err -> return failwithf "Bad /me response: %s" err
         }
 
+    /// Who was signed in last time, straight out of localStorage: no network,
+    /// no await. What the app opens on, before /me has had its say.
+    let rememberedUser () = LastUser.get ()
+
     let forgetMe () = LastUser.clear ()
 
     let getSyncCredentials () =
@@ -314,7 +318,14 @@ let private connector =
 let private syncOptions =
     createObj [ "retryDelayMs" ==> 1000; "crudUploadThrottleMs" ==> 200 ]
 
-let connect () = db.connect (connector, syncOptions)
+/// When the stream was last opened, so `syncNow` can tell a stream that was
+/// just built from one that has been sitting there since the app was last
+/// looked at.
+let mutable private openedAt = 0.0
+
+let connect () =
+    openedAt <- JS.Constructors.Date.now ()
+    db.connect (connector, syncOptions)
 
 /// Tears the sync stream down and opens a fresh one - `connect` again, which
 /// aborts whatever is there first.
@@ -327,8 +338,32 @@ let connect () = db.connect (connector, syncOptions)
 /// does it whenever it comes back to the foreground.
 let resync () = connect ()
 
+/// Closes the stream and leaves the local database where it is: the account
+/// the app opened on turned out to be signed out, so there is nothing to sync
+/// and no point retrying the credentials call every second behind the login
+/// page.
+let stopSync () =
+    openedAt <- 0.0
+    db.disconnect ()
+
 [<Emit("document.visibilityState === 'visible'")>]
 let private isVisible () : bool = jsNative
+
+/// How long a stream counts as freshly opened. Two taps in quick succession
+/// want one reconnect between them, not one each: tearing the stream down
+/// mid-checkpoint and starting over is the one thing that would make the app
+/// slower to catch up, which is the opposite of the point.
+let private quietMs = 1500.0
+
+/// Opens a fresh stream unless one was opened a moment ago. This is the "pull
+/// down whatever is new, now" the app reaches for whenever it has a reason to
+/// think it has fallen behind: coming back to the foreground, the network
+/// returning, or simply moving to another screen.
+let syncNow () =
+    let now = JS.Constructors.Date.now ()
+
+    if isVisible () && now - openedAt > quietMs then
+        resync () |> Promise.catch (fun err -> JS.console.error ("resync", err)) |> ignore
 
 /// Reconnects whenever the app is looked at again or the network comes back,
 /// so a change made elsewhere while it was away is there by the time the first
@@ -336,29 +371,20 @@ let private isVisible () : bool = jsNative
 ///
 /// `pageshow` is for Safari, which restores a page from its back/forward cache
 /// without firing `visibilitychange`. Coming back to the app tends to fire
-/// several of these at once (becoming visible is also regaining focus), and one
-/// reconnect is all they want between them, so a trigger within `quietMs` of
-/// the last reconnect is dropped. The clock starts now, since `connect` is
-/// happening alongside this. It only ever delays a *repeat*: the first trigger
-/// after a wait longer than that - which is every real wake-up - goes straight
-/// through.
+/// several of these at once (becoming visible is also regaining focus), and
+/// `syncNow`'s quiet window is what keeps that to one reconnect.
 let keepSynced () =
-    let quietMs = 3000.0
-    let mutable last = JS.Constructors.Date.now ()
-
-    let reconnect () =
-        let now = JS.Constructors.Date.now ()
-
-        if isVisible () && now - last > quietMs then
-            last <- now
-            resync () |> Promise.catch (fun err -> JS.console.error ("resync", err)) |> ignore
-
-    Browser.Dom.document.addEventListener ("visibilitychange", fun _ -> reconnect ())
-    Browser.Dom.window.addEventListener ("pageshow", fun _ -> reconnect ())
-    Browser.Dom.window.addEventListener ("focus", fun _ -> reconnect ())
-    Browser.Dom.window.addEventListener ("online", fun _ -> reconnect ())
+    Browser.Dom.document.addEventListener ("visibilitychange", fun _ -> syncNow ())
+    Browser.Dom.window.addEventListener ("pageshow", fun _ -> syncNow ())
+    Browser.Dom.window.addEventListener ("focus", fun _ -> syncNow ())
+    Browser.Dom.window.addEventListener ("online", fun _ -> syncNow ())
 
 let currentUser () = Api.getMe ()
+
+/// Who was signed in when the app was last closed, from localStorage. No
+/// network and no waiting: it is what the app opens on, with `currentUser`
+/// confirming it or taking it away a moment later.
+let rememberedUser () = Api.rememberedUser ()
 
 /// One page visit, counted for the usage dashboard. Totals, not people: the
 /// section name is all that is sent, and the server is what writes the row.

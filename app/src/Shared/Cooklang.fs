@@ -485,3 +485,109 @@ let cookware (recipe: Recipe) =
               match item with
               | Item.Cookware c -> yield c
               | _ -> () ]
+
+/// Every timer, in order.
+let timers (recipe: Recipe) =
+    [ for items in steps recipe do
+          for item in items do
+              match item with
+              | Item.Timer t -> yield t
+              | _ -> () ]
+
+/// A metadata value by name, ignoring case and whether the words of the key
+/// are joined by a space or an underscore: `time required`, `Time Required`
+/// and `time_required` are all the one key. First one wins, which is also
+/// what the duplicate-key warning is about.
+let metadata (name: string) (recipe: Recipe) =
+    let key (s: string) = s.Trim().ToLowerInvariant().Replace('_', ' ')
+    let name = key name
+    recipe.Metadata |> List.tryPick (fun (k, v) -> if key k = name then Some v else None)
+
+/// How long something takes, as recipes write it down. Cooklang has no type
+/// for a duration - `time: 1 hr 30 min` is free text and `~{10%minutes}` is a
+/// number and a word - so both are read the same way here, and a recipe that
+/// says "1 hr 30 min" agrees with one that says "90".
+module Duration =
+    /// A number and whatever unit word follows it: "1 hour", "30min", "20".
+    let private partRx = Regex @"(\d+(?:\.\d+)?)\s*([A-Za-z]*)"
+
+    /// Minutes in one of `unit`, or `None` for a word that isn't a duration
+    /// at all ("servings", "cloves"). A missing unit is minutes: that is what
+    /// `time: 45` means, and what a `~{10}` timer with no unit means.
+    let minutesIn (unit: string) =
+        match unit.Trim().ToLowerInvariant() with
+        | ""
+        | "m"
+        | "min"
+        | "mins"
+        | "minute"
+        | "minutes" -> Some 1.0
+        | "h"
+        | "hr"
+        | "hrs"
+        | "hour"
+        | "hours" -> Some 60.0
+        | "d"
+        | "day"
+        | "days" -> Some 1440.0
+        | "s"
+        | "sec"
+        | "secs"
+        | "second"
+        | "seconds" -> Some(1.0 / 60.0)
+        | _ -> None
+
+    /// The whole of `text` in minutes: every number in it that carries a unit
+    /// we know, added up, so "1 hour 30 minutes" is 90 and so is "90" and so
+    /// is "about 1.5 hours". `None` when there is nothing in there to add up -
+    /// "overnight", "until golden", "" - since no figure beats a made-up one.
+    let minutes (text: string) =
+        let parts =
+            partRx.Matches text
+            |> Seq.choose (fun m -> minutesIn m.Groups.[2].Value |> Option.map (fun per -> float m.Groups.[1].Value * per))
+            |> List.ofSeq
+
+        match parts with
+        | [] -> None
+        | parts -> Some(List.sum parts)
+
+let private timerMinutes (t: Timer) =
+    match t.Quantity with
+    | Some(Quantity.Number n) -> Duration.minutesIn (defaultArg t.Unit "") |> Option.map (fun per -> n * per)
+    | Some(Quantity.Text _)
+    | None -> None
+
+/// How long the recipe takes from the first step to it reaching the table, in
+/// whole minutes.
+///
+/// What the recipe says, if it says anything: `time required` - Cooklang's own
+/// key - or the `time`/`duration` people write instead, and failing that
+/// `prep time` and `cook time` added together. Failing all of those, the
+/// timers in the steps added up, which is the only figure the text itself
+/// carries. That last one over-counts a recipe that leaves one thing
+/// simmering while it chops the next, which is why anything the recipe states
+/// outright wins over it.
+///
+/// `None` when nothing in the recipe gives a number to go on.
+let totalMinutes (recipe: Recipe) =
+    let stated name = metadata name recipe |> Option.bind Duration.minutes
+
+    let fromMetadata =
+        match [ "time required"; "time"; "duration" ] |> List.tryPick stated with
+        | Some total -> Some total
+        | None ->
+            match stated "prep time", stated "cook time" with
+            | None, None -> None
+            | prep, cook -> Some(defaultArg prep 0.0 + defaultArg cook 0.0)
+
+    let fromTimers =
+        match timers recipe |> List.choose timerMinutes with
+        | [] -> None
+        | each -> Some(List.sum each)
+
+    // Rounded up, and so never to nothing: a recipe that says it takes half a
+    // minute says it takes a minute, which is what a row reading "(0min)"
+    // would be trying to say anyway.
+    match fromMetadata |> Option.orElse fromTimers with
+    | Some minutes when minutes > 0.0 -> Some(int (ceil minutes))
+    | _ -> None

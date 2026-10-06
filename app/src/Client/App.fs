@@ -350,9 +350,50 @@ let private fireAndForget (work: JS.Promise<'a>) =
         Browser.Dom.console.error err
         Ignore)
 
+/// Once signed in: open the live queries and start syncing.
+let private startSync () =
+    Cmd.batch
+        [ Cmd.ofEffect (fun dispatch -> Db.watchSyncFailing (SyncFailingChanged >> dispatch))
+          Cmd.ofEffect (fun _ -> Db.keepSynced ())
+          Cmd.ofEffect (fun dispatch -> Db.watchPantries (PantriesChanged >> dispatch))
+          Cmd.ofEffect (fun dispatch -> Db.watchPantryMembers (PantryMembersChanged >> dispatch))
+          Cmd.ofEffect (fun dispatch -> Db.watchRecipes (RecipesChanged >> dispatch))
+          Cmd.ofEffect (fun dispatch -> Db.watchShoppingLists (ShoppingListsChanged >> dispatch))
+          Cmd.ofEffect (fun dispatch -> Db.watchShoppingItems (ShoppingItemsChanged >> dispatch))
+          Cmd.ofEffect (fun dispatch -> Db.watchMenus (MenusChanged >> dispatch))
+          Cmd.ofEffect (fun dispatch -> Db.watchMenuRecipes (MenuRecipesChanged >> dispatch))
+          Cmd.ofEffect (fun dispatch -> Db.watchMenuSides (MenuSidesChanged >> dispatch))
+          Cmd.ofEffect (fun dispatch -> Db.watchTags (TagsChanged >> dispatch))
+          Cmd.ofEffect (fun dispatch -> Db.watchRecipeTags (RecipeTagsChanged >> dispatch))
+          Cmd.ofEffect (fun _ -> Db.connect () |> Promise.catch (fun e -> console.error e) |> ignore) ]
+
+/// Opens on whoever was signed in last time, straight out of localStorage,
+/// rather than on a spinner while /me is asked about it. The app runs on local
+/// data, which is already on the device, so the only thing a round trip to the
+/// server was buying was the wait: there is a screen to draw and everything
+/// needed to draw it. `SessionChecked` then confirms it, or takes it away and
+/// sends the browser to /login, which is what an expired session looked like
+/// anyway.
+///
+/// Only a browser that has never signed in here - nothing remembered, no local
+/// data either - still starts at `Checking`, where a spinner is the honest
+/// answer.
 let init () =
-    { Page = parseUrl (Router.currentUrl ())
-      Session = Checking
+    let remembered = Db.rememberedUser ()
+
+    let page =
+        match remembered, parseUrl (Router.currentUrl ()) with
+        // Already signed in has no business on /login.
+        | Some _, Login ->
+            Router.replace []
+            RecipeList
+        | _, page -> page
+
+    { Page = page
+      Session =
+        match remembered with
+        | Some user -> SignedIn user
+        | None -> Checking
       ReturnTo = []
       Recipes = []
       ShoppingLists = []
@@ -401,26 +442,15 @@ let init () =
     Cmd.batch
         [ Cmd.ofEffect (fun dispatch -> Router.onUrlChanged (UrlChanged >> dispatch))
           Cmd.ofEffect (fun dispatch -> registerPwa (UpdateAvailable >> dispatch))
+          // Opening on a remembered user is opening on a page, so that page is
+          // counted here; the `Checking` route counts its first page once the
+          // session settles, which is when it learns which page that is.
+          if remembered.IsSome then
+              startSync ()
+              countPage page
           Cmd.OfPromise.either Db.currentUser () SessionChecked (fun err ->
               console.error err
               SessionChecked None) ]
-
-/// Once signed in: open the live queries and start syncing.
-let private startSync () =
-    Cmd.batch
-        [ Cmd.ofEffect (fun dispatch -> Db.watchSyncFailing (SyncFailingChanged >> dispatch))
-          Cmd.ofEffect (fun _ -> Db.keepSynced ())
-          Cmd.ofEffect (fun dispatch -> Db.watchPantries (PantriesChanged >> dispatch))
-          Cmd.ofEffect (fun dispatch -> Db.watchPantryMembers (PantryMembersChanged >> dispatch))
-          Cmd.ofEffect (fun dispatch -> Db.watchRecipes (RecipesChanged >> dispatch))
-          Cmd.ofEffect (fun dispatch -> Db.watchShoppingLists (ShoppingListsChanged >> dispatch))
-          Cmd.ofEffect (fun dispatch -> Db.watchShoppingItems (ShoppingItemsChanged >> dispatch))
-          Cmd.ofEffect (fun dispatch -> Db.watchMenus (MenusChanged >> dispatch))
-          Cmd.ofEffect (fun dispatch -> Db.watchMenuRecipes (MenuRecipesChanged >> dispatch))
-          Cmd.ofEffect (fun dispatch -> Db.watchMenuSides (MenuSidesChanged >> dispatch))
-          Cmd.ofEffect (fun dispatch -> Db.watchTags (TagsChanged >> dispatch))
-          Cmd.ofEffect (fun dispatch -> Db.watchRecipeTags (RecipeTagsChanged >> dispatch))
-          Cmd.ofEffect (fun _ -> Db.connect () |> Promise.catch (fun e -> console.error e) |> ignore) ]
 
 // ---------------------------------------------------------------------------
 // Pantries
@@ -713,13 +743,33 @@ let private updateModel msg model =
             else
                 model.Page
 
-        { model with Session = SignedIn user; Page = page }, startSync ()
+        // The app that opened on a remembered user has been syncing since
+        // `init`; this only confirms who that user is.
+        let cmd =
+            match model.Session with
+            | SignedIn _ -> Cmd.none
+            | Checking
+            | SignedOut -> startSync ()
+
+        { model with Session = SignedIn user; Page = page }, cmd
     | SessionChecked None ->
         let returnTo = if isPublic model.Page then [] else Router.currentUrl ()
         if not (isPublic model.Page) then Router.replace [ "login" ]
 
         let page = if isPublic model.Page then model.Page else Login
-        { model with Session = SignedOut; Page = page; ReturnTo = returnTo }, Cmd.none
+
+        // The remembered user the app opened on is signed out after all, so
+        // the stream started for them has to go: its credentials call is a 401
+        // and PowerSync would keep asking, once a second, behind the login
+        // page. The local data stays - this browser may well sign the same
+        // person back in.
+        let cmd =
+            match model.Session with
+            | SignedIn _ -> fireAndForget (Db.stopSync ())
+            | Checking
+            | SignedOut -> Cmd.none
+
+        { model with Session = SignedOut; Page = page; ReturnTo = returnTo }, cmd
     // Off the login page before the browser leaves for Keycloak: what is on
     // screen at that moment is what stays there until the app loads again.
     | SignIn -> { model with Session = Checking }, Cmd.ofEffect (fun _ -> Db.signIn (Router.format model.ReturnTo))
@@ -732,6 +782,19 @@ let private updateModel msg model =
             | RecipeDetail id -> findRecipe id model.Recipes |> Option.map formOf
             | _ -> None
 
+        // Moving to another screen is the moment to find out what has changed
+        // elsewhere: it is a fresh thing being looked at, and it is the one
+        // instant the wait for a stream to come back costs nothing. Someone
+        // who tapped Menu to see tonight's menu should not have to leave and
+        // come back for the version the rest of the pantry is looking at.
+        // `syncNow` drops a repeat within its quiet window, so flicking
+        // between tabs is one reconnect, not one per tab.
+        let synced =
+            match model.Session with
+            | SignedIn _ -> Cmd.ofEffect (fun _ -> Db.syncNow ())
+            | Checking
+            | SignedOut -> Cmd.none
+
         { model with
             Page = page
             Edit = edit
@@ -742,7 +805,7 @@ let private updateModel msg model =
             Scanning = false
             PendingMemberRemove = None
             MenuOpen = false },
-        Cmd.none
+        synced
     // Each query holds every pantry's rows; the model keeps those and shows
     // the current pantry's. Only the list that changed is refilled, so a write
     // already on screen isn't wiped by another query landing before its own.
@@ -1679,6 +1742,22 @@ let private noteSpan (className: string) (note: string) =
     else
         Html.span [ prop.className ("min-w-0 truncate pl-3 lg:pl-0 " + className); prop.text note ]
 
+/// How long the recipe takes from starting to cook to it reaching the table,
+/// right of its title: "(45min)". Quiet and grey, like the note beside it.
+///
+/// Nothing at all when the recipe gives nothing to work it out from (see
+/// `Cooklang.totalMinutes`): a guess at how long dinner takes is worse than
+/// no figure, and the row reads the same as it always did until someone
+/// writes a `time:` line or a `~{20%minutes}` timer into the recipe.
+let private timeBadge (body: string) =
+    match Cooklang.totalMinutes (Cooklang.parse body).Recipe with
+    | None -> Html.none
+    | Some minutes ->
+        Html.span
+            [ prop.className "shrink-0 text-sm text-gray-400 tabular-nums"
+              prop.title "Total time, start to table"
+              prop.text $"({minutes}min)" ]
+
 /// A recipe's tags, after its title: small grey rectangles, the same sharp
 /// corners as everything else on the page.
 let private tagBadges (tags: Tag list) =
@@ -1775,11 +1854,19 @@ let private listPage (model: Model) (known: CooklangEditor.KnownNames) dispatch 
                                           Html.div
                                               [ prop.className "flex min-w-0 flex-1 flex-col items-start gap-1 lg:contents"
                                                 prop.children
-                                                    [ linkWith
-                                                          "text-blue-600 underline hover:text-blue-800"
-                                                          dispatch
-                                                          [ "recipe"; r.id ]
-                                                          r.title
+                                                    [ // The title and the time it takes are one
+                                                      // thing: the time stays on the title's line
+                                                      // on a phone, where everything else under it
+                                                      // has gone to a line of its own.
+                                                      Html.div
+                                                          [ prop.className "flex min-w-0 max-w-full items-baseline gap-1.5"
+                                                            prop.children
+                                                                [ linkWith
+                                                                      "text-blue-600 underline hover:text-blue-800"
+                                                                      dispatch
+                                                                      [ "recipe"; r.id ]
+                                                                      r.title
+                                                                  timeBadge r.body ] ]
                                                       noteSpan "text-sm text-gray-400" (addedByNote model r.user_id)
                                                       match tagsOf model r.id with
                                                       | [] -> Html.none
@@ -2468,11 +2555,16 @@ let private menuPage (model: Model) dispatch =
                                                           [ prop.className
                                                                 "flex min-w-0 flex-1 flex-col items-start lg:contents"
                                                             prop.children
-                                                                [ linkWith
-                                                                      "text-blue-600 underline hover:text-blue-800"
-                                                                      dispatch
-                                                                      [ "recipe"; r.id ]
-                                                                      r.title
+                                                                [ Html.div
+                                                                      [ prop.className
+                                                                            "flex min-w-0 max-w-full items-baseline gap-1.5"
+                                                                        prop.children
+                                                                            [ linkWith
+                                                                                  "text-blue-600 underline hover:text-blue-800"
+                                                                                  dispatch
+                                                                                  [ "recipe"; r.id ]
+                                                                                  r.title
+                                                                              timeBadge r.body ] ]
                                                                   noteSpan
                                                                       "text-sm text-gray-400"
                                                                       (Shared.Note.text
