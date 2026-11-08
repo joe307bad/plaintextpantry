@@ -49,6 +49,10 @@ type SyncStatus =
     abstract uploading: bool
     abstract downloading: bool
     abstract hasSynced: bool option
+    /// When the last download finished, `None` until one has. It advances on
+    /// every completed checkpoint, including one that brought nothing down,
+    /// which is what makes it an answer to "am I up to date now?".
+    abstract lastSyncedAt: JS.Date option
     /// Last failure from the connector's uploadData; the SDK only logs these at debug level.
     abstract uploadError: exn option
     abstract downloadError: exn option

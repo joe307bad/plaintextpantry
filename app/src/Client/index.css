@@ -151,6 +151,14 @@
   animation: spinner 700ms linear infinite;
 }
 
+/* The Sync button's arrows while a sync it asked for is still out. Shares the
+   waiting screen's keyframes; `inline-flex` because it wraps an inline icon
+   and a bare `span` has no box of its own to turn around. */
+.spin {
+  display: inline-flex;
+  animation: spinner 900ms linear infinite;
+}
+
 /* Mobile menu: the sheet slides up and the backdrop fades, fast enough to
    read as immediate but with enough motion to show where it came from. */
 @keyframes sheet-in {

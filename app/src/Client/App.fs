@@ -189,9 +189,15 @@ type Model =
       /// Everything sync has, which the lists above are the current pantry's
       /// share of.
       Synced: Synced
-      /// True while sync can't reach the server. Only the waiting screen reads
-      /// it, to tell a first sync still on its way from one that can't be made.
-      SyncFailing: bool
+      /// What sync is doing: the waiting screen tells a first sync still on
+      /// its way from one that can't be made, and the Sync button watches
+      /// `LastSyncedAt` to know when the tap it is wearing has landed.
+      Sync: Db.SyncState
+      /// When Sync was last tapped, in epoch milliseconds, for as long as that
+      /// tap is still outstanding. `Some` is what spins the button; it is put
+      /// down when a sync finishes after it, or when it has waited long enough
+      /// that something is clearly wrong.
+      SyncRequestedAt: float option
       /// The mobile bottom-sheet menu, toggled by the logo button.
       MenuOpen: bool
       /// Set once a new version is installed and waiting; calling it reloads
@@ -261,9 +267,12 @@ type Msg =
     | ConfirmDelete of id: string
     | CancelDelete
     | DeleteRecipe of id: string
-    | SyncFailingChanged of bool
-    /// Reconnects the sync stream by hand, from the waiting screen.
+    | SyncChanged of Db.SyncState
+    /// Reconnects the sync stream by hand: the Sync button in the header, and
+    /// "Try again" on the waiting screen.
     | Resync
+    /// A tap on Sync that has waited long enough without landing.
+    | SyncTimedOut of requestedAt: float
     | PantriesChanged of Db.Pantry list
     | PantryMembersChanged of PantryMember list
     | SelectPantry of id: string option
@@ -322,6 +331,11 @@ let private countPage page =
 let private after (ms: int) (msg: Msg) =
     Cmd.ofEffect (fun dispatch -> window.setTimeout ((fun () -> dispatch msg), ms) |> ignore)
 
+/// How long a tap on Sync waits for a sync to finish before giving up on it.
+/// Long enough for a phone waking up on a slow connection to get a stream
+/// back, short enough that nobody is left watching it spin.
+let private syncTimeoutMs = 10_000
+
 /// How long the toast's enter/exit animations run (index.css).
 let private toastAnimationMs = 150
 
@@ -353,7 +367,7 @@ let private fireAndForget (work: JS.Promise<'a>) =
 /// Once signed in: open the live queries and start syncing.
 let private startSync () =
     Cmd.batch
-        [ Cmd.ofEffect (fun dispatch -> Db.watchSyncFailing (SyncFailingChanged >> dispatch))
+        [ Cmd.ofEffect (fun dispatch -> Db.watchSync (SyncChanged >> dispatch))
           Cmd.ofEffect (fun _ -> Db.keepSynced ())
           Cmd.ofEffect (fun dispatch -> Db.watchPantries (PantriesChanged >> dispatch))
           Cmd.ofEffect (fun dispatch -> Db.watchPantryMembers (PantryMembersChanged >> dispatch))
@@ -435,7 +449,8 @@ let init () =
           MenuSides = []
           Tags = []
           RecipeTags = [] }
-      SyncFailing = false
+      Sync = Db.noSync
+      SyncRequestedAt = None
       MenuOpen = false
       Update = None
       Toast = None },
@@ -858,8 +873,36 @@ let private updateModel msg model =
             Synced = { model.Synced with RecipeTags = links }
             RecipeTags = inPantry model.Pantry (fun (l: RecipeTag) -> l.pantry_id) links },
         Cmd.none
-    | SyncFailingChanged failing -> { model with SyncFailing = failing }, Cmd.none
-    | Resync -> model, fireAndForget (Db.resync ())
+    | SyncChanged sync ->
+        let model = { model with Sync = sync }
+
+        // A tap on Sync is answered by the next sync to finish after it, which
+        // is the one it asked for. "Nothing new" is a real answer and lands
+        // here the same way, since `LastSyncedAt` moves on an empty checkpoint
+        // too - so the button always stops, and always says something.
+        match model.SyncRequestedAt, sync.LastSyncedAt with
+        | Some requestedAt, Some syncedAt when syncedAt >= requestedAt ->
+            toast "Up to date" { model with SyncRequestedAt = None }
+        | _ -> model, Cmd.none
+    // The button and "Try again" both mean "now", so this is `resync` rather
+    // than `syncNow`: a quiet window that silently dropped the tap would be
+    // the very thing the button exists to fix.
+    | Resync ->
+        let requestedAt = JS.Constructors.Date.now ()
+
+        { model with SyncRequestedAt = Some requestedAt },
+        Cmd.batch
+            [ fireAndForget (Db.resync ())
+              // Nothing comes back from a sync that cannot be made, so the
+              // button would spin until the app was closed. This is what puts
+              // it down and says so.
+              after syncTimeoutMs (SyncTimedOut requestedAt) ]
+    | SyncTimedOut requestedAt ->
+        // Only the tap this timer was set for; a later one has its own.
+        if model.SyncRequestedAt = Some requestedAt then
+            toast "Couldn't sync. Check your connection." { model with SyncRequestedAt = None }
+        else
+            model, Cmd.none
     // Which pantries there are, and who is in them, can change which pantry is
     // current - an approval coming through, a membership taken away - so both
     // settle everything.
@@ -1338,6 +1381,40 @@ let private pantrySelect (className: string) (choices: PantryChoice list) (selec
                               + (if choice.Approved then "" else " (pending approval)")
                           ) ] ] ]
 
+/// Circular arrows (Heroicons' arrow-path, MIT).
+let private syncIcon =
+    icon
+        "h-4 w-4"
+        [ "M20 10a8 8 0 0 0-13.7-4.6L3 8.5"
+          "M3 4.5V9h4.5"
+          "M4 14a8 8 0 0 0 13.7 4.6L21 15.5"
+          "M21 19.5V15h-4.5" ]
+
+/// "Sync": pull down whatever is new, now.
+///
+/// Everything else that reconnects does so because the app guessed it had
+/// fallen behind - coming back to the foreground, moving to another screen.
+/// This is the one that asks, for the times the guessing was wrong, and it
+/// says what happened: the arrows turn while it waits, and a toast says
+/// either "Up to date" or that it couldn't.
+///
+/// Borrows the pantry picker's border so the two sit together as one control
+/// wherever they land, side by side in the header or stacked in the sheet.
+let private syncButton (className: string) (syncing: bool) dispatch =
+    Html.button
+        [ prop.type' "button"
+          prop.className (
+              "flex shrink-0 items-center gap-1.5 border border-gray-300 bg-white px-2 py-0.5 text-sm text-gray-700 "
+              + "hover:bg-gray-50 disabled:opacity-60 "
+              + className
+          )
+          prop.title "Pull down the latest changes"
+          prop.disabled syncing
+          prop.onClick (fun _ -> dispatch Resync)
+          prop.children
+              [ Html.span [ prop.className (if syncing then "spin" else ""); prop.children [ syncIcon ] ]
+                Html.span [ prop.text (if syncing then "Syncing…" else "Sync") ] ] ]
+
 /// The way to the settings page, beside the pantry it is about.
 let private settingsCog (className: string) (isActive: bool) dispatch =
     Html.a (
@@ -1353,7 +1430,7 @@ let private settingsCog (className: string) (isActive: bool) dispatch =
 /// "Shopping list" and "Sign out" onto second lines, and the phone layout -
 /// `mobileMenu` - is the better answer at that width. That breakpoint is where
 /// the whole layout turns over, here and everywhere else `lg:` appears.
-let private navBar (page: Page) (user: Shared.User) (choices: PantryChoice list) (pantry: string option) dispatch =
+let private navBar (page: Page) (user: Shared.User) (choices: PantryChoice list) (pantry: string option) (syncing: bool) dispatch =
     // `nav-link` (index.css) reserves the bold width from a hidden copy of the
     // text in `data-text`, so the active link going bold shifts nothing.
     let navLink segments (text: string) isActive =
@@ -1383,6 +1460,7 @@ let private navBar (page: Page) (user: Shared.User) (choices: PantryChoice list)
                 navLink [ "shopping-list" ] "Shopping list" (page = ShoppingList)
                 navLink [ "menu" ] "Menu" (page = Menu)
                 pantrySelect "ml-auto" choices pantry dispatch
+                syncButton "" syncing dispatch
                 settingsCog "" (page = Settings) dispatch
                 Html.span [ prop.className "text-sm text-gray-500"; prop.text user.Email ]
                 Html.button
@@ -1393,7 +1471,7 @@ let private navBar (page: Page) (user: Shared.User) (choices: PantryChoice list)
 /// Phones, and any window under `lg`: no top bar. The logo sits bottom-right
 /// (the one round button in the app) and toggles a bottom sheet holding the
 /// same links. Navigating closes it (see UrlChanged).
-let private mobileMenu (page: Page) (user: Shared.User) (choices: PantryChoice list) (pantry: string option) (isOpen: bool) dispatch =
+let private mobileMenu (page: Page) (user: Shared.User) (choices: PantryChoice list) (pantry: string option) (syncing: bool) (isOpen: bool) dispatch =
     let navLink segments text isActive =
         linkWith
             ("block py-3 text-lg " + if isActive then "font-semibold text-gray-900" else "text-gray-600")
@@ -1424,6 +1502,10 @@ let private mobileMenu (page: Page) (user: Shared.User) (choices: PantryChoice l
                                       prop.children
                                           [ pantrySelect "min-w-0 flex-1" choices pantry dispatch
                                             settingsCog "p-1" (page = Settings) dispatch ] ]
+                                // Under the pantry it is about: a full-width
+                                // tap target, since this is a phone and the
+                                // sheet has the room.
+                                syncButton "mt-2 w-full justify-center py-2" syncing dispatch
                                 Html.div
                                     [ prop.className "mt-3 flex items-center justify-between border-t border-gray-200 pt-4"
                                       prop.children
@@ -2832,13 +2914,15 @@ let View () =
     | SignedIn _, Login -> loadingPage dispatch
     // Nothing the shell shows makes sense without a pantry: every page reads
     // one pantry's rows, and the header has nothing to name.
-    | SignedIn _, _ when model.Pantry.IsNone -> waitingPage model.SyncFailing dispatch
+    | SignedIn _, _ when model.Pantry.IsNone -> waitingPage model.Sync.Failing dispatch
     | SignedIn user, _ ->
         Html.div
             [ let choices = pantryChoices model
 
-              navBar model.Page user choices model.Pantry dispatch
-              mobileMenu model.Page user choices model.Pantry model.MenuOpen dispatch
+              let syncing = model.SyncRequestedAt.IsSome
+
+              navBar model.Page user choices model.Pantry syncing dispatch
+              mobileMenu model.Page user choices model.Pantry syncing model.MenuOpen dispatch
               Html.main
                   [ // Enough bottom padding that the last row scrolls clear of the
                     // fixed "Created" pill and menu button.

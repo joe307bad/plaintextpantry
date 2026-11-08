@@ -474,13 +474,27 @@ let watchMenuRecipes (onChange: MenuRecipe list -> unit) =
             member _.onError(err) = JS.console.error ("watch menu recipes", err) }
     |> ignore
 
-/// Live sync health: true while downloads are failing, which is what having no
-/// network - or a server that isn't answering - looks like from in here.
-/// Connection errors count as download errors, so an app that cannot get a
-/// stream up at all reports true too. Called once straight away and then on
-/// every change.
-let watchSyncFailing (onChange: bool -> unit) =
-    let report (status: SyncStatus) = onChange status.downloadError.IsSome
+/// What the app knows about its own sync, as the header's Sync button and the
+/// waiting screen read it.
+type SyncState =
+    { /// When the last download finished, in epoch milliseconds; `None` until
+      /// one has. A tap on Sync is finished when this passes the moment of the
+      /// tap - including when nothing came down, which is itself the answer.
+      LastSyncedAt: float option
+      /// True while downloads are failing, which is what having no network -
+      /// or a server that isn't answering - looks like from in here.
+      /// Connection errors count as download errors, so an app that cannot get
+      /// a stream up at all reports true too.
+      Failing: bool }
+
+let noSync = { LastSyncedAt = None; Failing = false }
+
+/// Live sync state. Called once straight away and then on every change.
+let watchSync (onChange: SyncState -> unit) =
+    let report (status: SyncStatus) =
+        onChange
+            { LastSyncedAt = status.lastSyncedAt |> Option.map (fun d -> d.getTime ())
+              Failing = status.downloadError.IsSome }
 
     report db.currentStatus
     db.registerListener (createObj [ "statusChanged" ==> report ]) |> ignore
